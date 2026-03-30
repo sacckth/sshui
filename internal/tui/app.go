@@ -1047,6 +1047,10 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.hostList.SettingFilter() {
+		if tryFilterListArrowNav(&m.hostList, msg) {
+			m.syncBrowsePreview()
+			return m, nil
+		}
 		cmd := m.updateHostList(msg)
 		m.syncBrowsePreview()
 		return m, cmd
@@ -1194,6 +1198,9 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.treePaneFocused {
 		if m.hostList.SettingFilter() {
+			if tryFilterListArrowNav(&m.hostList, msg) {
+				return m, nil
+			}
 			cmd := m.updateHostList(msg)
 			return m, cmd
 		}
@@ -1236,6 +1243,9 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity {
 		if m.detailList.SettingFilter() {
+			if tryFilterListArrowNav(&m.detailList, msg) {
+				return m, nil
+			}
 			var cmd tea.Cmd
 			m.detailList, cmd = m.detailList.Update(msg)
 			return m, cmd
@@ -1470,6 +1480,9 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.pickerList.SettingFilter() {
+		if tryFilterListArrowNav(&m.pickerList, msg) {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.pickerList, cmd = m.pickerList.Update(msg)
 		return m, cmd
@@ -1756,7 +1769,7 @@ Browse (split view)
   Left: Host patterns only, grouped under (default) and #@group sections
   Right: directive preview for the selected host row
   enter     Open full editor (tabs, add/remove directives, …)
-  /         Filter host list by the visible Host column (fuzzy match + highlight)
+  /         Filter host list by the visible Host column (fuzzy match + highlight); with 2+ matches, ↑↓ or k/j moves selection before Enter applies
   z         Collapse/expand group (when a group header row is selected)
   A         Actions: ssh / sftp / copy command (host row)
   n         New host under (default)

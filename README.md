@@ -79,23 +79,19 @@ Press `?` in the TUI for keybindings.
 
 ## Screenshots
 
-Illustrative renders (fictional hosts/users/addresses). To try the real TUI with the same synthetic file used for docs:
+The images below are **illustrative** placeholders; they may not match every pixel of the current TUI. See **[docs/SCREENSHOTS.md](docs/SCREENSHOTS.md)** for how to capture **real** screenshots using the synthetic config.
+
+Try the live UI with the same demo file:
 
 ```bash
 sshui --config "$(pwd)/docs/readme-demo.conf"
 ```
 
-![Browse hosts and directive preview](docs/screenshots/browse.png)
+![Illustrative browse view](docs/screenshots/browse.png)
 
-*Browse: host tree (left) and directive preview (right).*
+![Illustrative detail view](docs/screenshots/detail.png)
 
-![Host detail split view](docs/screenshots/detail.png)
-
-*Detail: split view with directive list.*
-
-![Filtering the host list](docs/screenshots/filter.png)
-
-*Filter mode narrows rows by the visible Host column.*
+![Illustrative filter view](docs/screenshots/filter.png)
 
 ## Help
 

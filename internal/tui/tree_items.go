@@ -182,6 +182,11 @@ func newDetailListDelegate() list.DefaultDelegate {
 	d.ShowDescription = true
 	d.SetSpacing(0)
 	d.Styles.FilterMatch = filterMatchStyle
+	// Zero default left padding and border mismatch so selected rows don't shift horizontally.
+	d.Styles.NormalTitle = d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0)
+	d.Styles.NormalDesc = d.Styles.NormalDesc.Copy().Padding(0, 0, 0, 0)
+	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0)
+	d.Styles.DimmedDesc = d.Styles.DimmedDesc.Copy().Padding(0, 0, 0, 0)
 	d.Styles.SelectedTitle = listSelectedTitleStyle
 	d.Styles.SelectedDesc = listSelectedDescStyle
 	return d

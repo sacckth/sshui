@@ -47,7 +47,7 @@ func applyTheme(name string) {
 		helpStyle = lipgloss.NewStyle().Padding(1, 2).Foreground(lipgloss.Color("223"))
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("150"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("222"))
-		setPaneStyles(noColor, lipgloss.Color("234"), lipgloss.Color("235"), lipgloss.Color("240"))
+		setPaneStyles(noColor, lipgloss.Color("236"), lipgloss.Color("233"), lipgloss.Color("244"))
 		setGroupHeaderStyles(noColor, lipgloss.Color("214"), lipgloss.Color("223"))
 	case "muted":
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
@@ -56,7 +56,7 @@ func applyTheme(name string) {
 		helpStyle = lipgloss.NewStyle().Padding(1, 2).Foreground(lipgloss.Color("243"))
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("185"))
-		setPaneStyles(noColor, lipgloss.Color("235"), lipgloss.Color("236"), lipgloss.Color("239"))
+		setPaneStyles(noColor, lipgloss.Color("237"), lipgloss.Color("234"), lipgloss.Color("242"))
 		setGroupHeaderStyles(noColor, lipgloss.Color("247"), lipgloss.Color("252"))
 	default:
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
@@ -65,7 +65,7 @@ func applyTheme(name string) {
 		helpStyle = lipgloss.NewStyle().Padding(1, 2)
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-		setPaneStyles(noColor, lipgloss.Color("235"), lipgloss.Color("236"), lipgloss.Color("238"))
+		setPaneStyles(noColor, lipgloss.Color("236"), lipgloss.Color("234"), lipgloss.Color("245"))
 		setGroupHeaderStyles(noColor, lipgloss.Color("81"), lipgloss.Color("159"))
 	}
 	if noColor {
@@ -99,7 +99,8 @@ func setPaneStyles(noColor bool, leftBG, rightBG, sepFG lipgloss.TerminalColor) 
 	}
 	paneLeftStyle = lipgloss.NewStyle().Background(leftBG)
 	paneRightStyle = lipgloss.NewStyle().Background(rightBG)
-	paneSepStyle = lipgloss.NewStyle().Foreground(sepFG).Background(rightBG)
+	// Separator column uses left pane background so the bar reads as a divide, not a third shade.
+	paneSepStyle = lipgloss.NewStyle().Foreground(sepFG).Background(leftBG)
 	footerRuleStyle = lipgloss.NewStyle().Foreground(sepFG)
 }
 
