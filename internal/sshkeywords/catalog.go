@@ -1,0 +1,125 @@
+package sshkeywords
+
+import "strings"
+
+// Entry describes a client config keyword for picker/autocomplete (UX hints only).
+type Entry struct {
+	Name       string
+	Repeatable bool
+	Hint       string
+}
+
+// Catalog is a baseline set of OpenSSH client keywords (may omit rare tokens).
+var Catalog = []Entry{
+	{Name: "HostName", Hint: "real hostname or IP"},
+	{Name: "User", Hint: "remote username"},
+	{Name: "Port", Hint: "port number"},
+	{Name: "AddressFamily", Hint: "any|inet|inet6"},
+	{Name: "BatchMode", Hint: "yes|no"},
+	{Name: "BindAddress", Hint: "local address"},
+	{Name: "BindInterface", Hint: "interface name"},
+	{Name: "CanonicalDomains", Repeatable: true},
+	{Name: "CanonicalizeFallbackLocal", Hint: "yes|no"},
+	{Name: "CanonicalizeHostname", Hint: "yes|no|always"},
+	{Name: "CanonicalizeMaxDots", Hint: "number"},
+	{Name: "CanonicalizePermittedCNAMEs", Repeatable: true},
+	{Name: "CASignatureAlgorithms", Hint: "algorithm list"},
+	{Name: "CertificateFile", Repeatable: true, Hint: "path"},
+	{Name: "CheckHostIP", Hint: "yes|no"},
+	{Name: "Ciphers", Hint: "cipher list"},
+	{Name: "Compression", Hint: "yes|no"},
+	{Name: "ConnectionAttempts", Hint: "count"},
+	{Name: "ConnectTimeout", Hint: "seconds"},
+	{Name: "ControlMaster", Hint: "yes|no|ask|auto|autoask"},
+	{Name: "ControlPath", Hint: "path pattern"},
+	{Name: "ControlPersist", Hint: "time|yes|no"},
+	{Name: "DynamicForward", Repeatable: true, Hint: "[bind:]port"},
+	{Name: "EnableSSHKeysign", Hint: "yes|no"},
+	{Name: "EscapeChar", Hint: "char|none"},
+	{Name: "ExitOnForwardFailure", Hint: "yes|no"},
+	{Name: "FingerprintHash", Hint: "md5|sha256"},
+	{Name: "ForwardAgent", Hint: "yes|no"},
+	{Name: "ForwardX11", Hint: "yes|no"},
+	{Name: "ForwardX11Timeout", Hint: "time"},
+	{Name: "ForwardX11Trusted", Hint: "yes|no"},
+	{Name: "GatewayPorts", Hint: "yes|no|clientspecified"},
+	{Name: "GlobalKnownHostsFile", Repeatable: true},
+	{Name: "GSSAPIAuthentication", Hint: "yes|no"},
+	{Name: "GSSAPIDelegateCredentials", Hint: "yes|no"},
+	{Name: "HashKnownHosts", Hint: "yes|no"},
+	{Name: "HostbasedAuthentication", Hint: "yes|no"},
+	{Name: "HostbasedKeyTypes", Hint: "pattern list"},
+	{Name: "HostKeyAlgorithms", Hint: "algorithm list"},
+	{Name: "HostKeyAlias", Hint: "alias"},
+	{Name: "IdentityAgent", Hint: "path|none"},
+	{Name: "IdentityFile", Repeatable: true, Hint: "path"},
+	{Name: "IdentitiesOnly", Hint: "yes|no"},
+	{Name: "IPQoS", Hint: "tos|class"},
+	{Name: "KbdInteractiveAuthentication", Hint: "yes|no"},
+	{Name: "KbdInteractiveDevices", Hint: "list"},
+	{Name: "KexAlgorithms", Hint: "algorithm list"},
+	{Name: "KnownHostsCommand", Hint: "command"},
+	{Name: "LocalCommand", Hint: "command"},
+	{Name: "LocalForward", Repeatable: true, Hint: "[bind:]port host:port"},
+	{Name: "LogLevel", Hint: "QUIET|FATAL|ERROR|INFO|VERBOSE|DEBUG|DEBUG2|DEBUG3"},
+	{Name: "MACs", Hint: "mac list"},
+	{Name: "NoHostAuthenticationForLocalhost", Hint: "yes|no"},
+	{Name: "NumberOfPasswordPrompts", Hint: "n"},
+	{Name: "PasswordAuthentication", Hint: "yes|no"},
+	{Name: "PermitLocalCommand", Hint: "yes|no"},
+	{Name: "PKCS11Provider", Hint: "path"},
+	{Name: "PreferredAuthentications", Hint: "list"},
+	{Name: "Protocol", Hint: "1|2"},
+	{Name: "ProxyCommand", Hint: "command"},
+	{Name: "ProxyJump", Hint: "host|[user@]host[:port]"},
+	{Name: "ProxyUseFdpass", Hint: "yes|no"},
+	{Name: "PubkeyAcceptedAlgorithms", Hint: "algorithm list"},
+	{Name: "PubkeyAuthentication", Hint: "yes|no"},
+	{Name: "RekeyLimit", Hint: "bytes|time"},
+	{Name: "RemoteCommand", Hint: "command"},
+	{Name: "RemoteForward", Repeatable: true, Hint: "[bind:]port host:port"},
+	{Name: "RequestTTY", Hint: "yes|no|force|auto"},
+	{Name: "RevokedHostKeys", Hint: "path"},
+	{Name: "SendEnv", Repeatable: true, Hint: "VAR"},
+	{Name: "ServerAliveCountMax", Hint: "n"},
+	{Name: "ServerAliveInterval", Hint: "seconds"},
+	{Name: "SessionType", Hint: "default|none|subsystem"},
+	{Name: "SetEnv", Repeatable: true, Hint: "VAR VALUE"},
+	{Name: "StreamLocalBindMask", Hint: "octal"},
+	{Name: "StreamLocalBindUnlink", Hint: "yes|no"},
+	{Name: "StrictHostKeyChecking", Hint: "yes|no|ask|accept-new|off"},
+	{Name: "SyslogFacility", Hint: "DAEMON|USER|AUTH|LOCAL0|..."},
+	{Name: "TCPKeepAlive", Hint: "yes|no"},
+	{Name: "Tunnel", Hint: "yes|no|point-to-point|ethernet"},
+	{Name: "TunnelDevice", Hint: "device"},
+	{Name: "UpdateHostKeys", Hint: "yes|no|ask"},
+	{Name: "UserKnownHostsFile", Repeatable: true},
+	{Name: "VerifyHostKeyDNS", Hint: "yes|no|ask"},
+	{Name: "VisualHostKey", Hint: "yes|no"},
+	{Name: "XAuthLocation", Hint: "path"},
+}
+
+// Names returns directive names for filtering.
+func Names() []string {
+	out := make([]string, len(Catalog))
+	for i := range Catalog {
+		out[i] = Catalog[i].Name
+	}
+	return out
+}
+
+// Filter returns catalog entries whose name contains q (case-insensitive).
+func Filter(q string) []Entry {
+	q = strings.ToLower(strings.TrimSpace(q))
+	if q == "" {
+		return Catalog
+	}
+	var out []Entry
+	for _, e := range Catalog {
+		nl := strings.ToLower(e.Name)
+		if strings.Contains(nl, q) || strings.HasPrefix(nl, q) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
