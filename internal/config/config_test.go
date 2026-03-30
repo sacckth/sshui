@@ -77,6 +77,42 @@ func TestMoveHostGroupToDefault(t *testing.T) {
 	}
 }
 
+func TestAddDeleteRenameGroup(t *testing.T) {
+	cfg := &Config{}
+	if err := cfg.AddGroup("work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.AddGroup("work"); err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	if len(cfg.Groups) != 1 {
+		t.Fatalf("groups %d", len(cfg.Groups))
+	}
+	cfg.Groups[0].Hosts = []HostBlock{{Patterns: []string{"h"}}}
+	if err := cfg.DeleteGroupByName("work"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Groups) != 0 || len(cfg.DefaultHosts) != 1 {
+		t.Fatalf("g=%d d=%d", len(cfg.Groups), len(cfg.DefaultHosts))
+	}
+	if err := cfg.DeleteGroupByName("(default)"); err == nil {
+		t.Fatal("expected error deleting default")
+	}
+	cfg.Groups = []Group{{Name: "a", Hosts: nil}}
+	if err := cfg.RenameGroup(0, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Groups[0].Name != "b" {
+		t.Fatal(cfg.Groups[0].Name)
+	}
+	if err := cfg.SetGroupDescription(0, "note"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Groups[0].Descriptions) != 1 || !strings.HasPrefix(cfg.Groups[0].Descriptions[0], "#@desc:") {
+		t.Fatalf("%+v", cfg.Groups[0].Descriptions)
+	}
+}
+
 func TestIncludeFlag(t *testing.T) {
 	raw := `Include config.d/*
 Host x

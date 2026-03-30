@@ -33,8 +33,12 @@ const (
 	modeInputCustomKey
 	modeInputNewHost
 	modeInputDuplicateHost
+	modeInputNewGroup
+	modeInputRenameGroup
+	modeInputGroupDesc
 	modeHelp
 	modeConfirmDeleteHost
+	modeConfirmDeleteGroup
 )
 
 // Model is the root Bubble Tea model for sshui.
@@ -59,8 +63,11 @@ type Model struct {
 	editDirectiveIndex   int // >=0 when editing value; -1 when adding
 	status               string
 	editor               string // from app config; VISUAL/EDITOR used when empty
-	confirmReturnMode    viewMode
-	returnAfterInput     viewMode
+	confirmReturnMode       viewMode
+	returnAfterInput        viewMode
+	groupPickerReturnMode   viewMode
+	pendingDeleteGroupName  string
+	editGroupIdx            int
 }
 
 var (
@@ -68,6 +75,7 @@ var (
 	statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	helpStyle   = lipgloss.NewStyle().Padding(1, 2)
+	colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
 )
 
 // New builds a TUI model for the given config path and parsed config.
@@ -76,7 +84,7 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	w, h := 80, 24
 	hostItems := buildHostItems(cfg, w)
 	delegate := newCompactListDelegate()
-	l := list.New(hostItems, delegate, w, h-3)
+	l := list.New(hostItems, delegate, w, max(6, h-4))
 	l.Title = "SSH hosts"
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
@@ -137,7 +145,8 @@ func (m *Model) rebuildHostList() {
 	m.hostList.SetItems(buildHostItems(m.cfg, m.width))
 }
 
-func (m *Model) openGroupPicker() {
+func (m *Model) openGroupPicker(returnTo viewMode) {
+	m.groupPickerReturnMode = returnTo
 	var items []list.Item
 	items = append(items, groupPickItem{label: "(default)", toDefault: true, groupIdx: -1})
 	for i := range m.cfg.Groups {
@@ -174,7 +183,11 @@ func (m *Model) newDetailList() list.Model {
 	delegate.ShowDescription = true
 	delegate.SetSpacing(0)
 	l := list.New(items, delegate, m.width, m.height-3)
-	l.Title = "Directives — " + hostTitle(h)
+	title := "Directives — " + hostTitle(h)
+	if !m.selRef.InDefault && m.selRef.GroupIdx >= 0 && m.selRef.GroupIdx < len(m.cfg.Groups) {
+		title += " — group: " + m.cfg.Groups[m.selRef.GroupIdx].Name
+	}
+	l.Title = title
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
@@ -244,7 +257,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.hostList.SetWidth(msg.Width)
-		m.hostList.SetHeight(max(6, msg.Height-3))
+		m.hostList.SetHeight(max(6, msg.Height-4))
 		if m.mode == modeTree {
 			m.rebuildHostList()
 		}
@@ -292,17 +305,40 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case modeConfirmDeleteGroup:
+			switch msg.String() {
+			case "y", "Y":
+				if err := m.cfg.DeleteGroupByName(m.pendingDeleteGroupName); err != nil {
+					m.status = errStyle.Render(err.Error())
+				} else {
+					m.dirty = true
+					m.rebuildHostList()
+					m.status = "Group removed; hosts moved to (default)."
+				}
+				m.pendingDeleteGroupName = ""
+				m.mode = modeTree
+			case "n", "N", "esc":
+				m.status = ""
+				m.pendingDeleteGroupName = ""
+				m.mode = modeTree
+			}
+			return m, nil
+
 		case modeGroupPicker:
 			return m.updateGroupPicker(msg)
 
-		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputDuplicateHost:
+		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputDuplicateHost,
+			modeInputNewGroup, modeInputRenameGroup, modeInputGroupDesc:
 			switch msg.String() {
 			case "esc":
 				m.editDirectiveIndex = -1
 				m.pendingDirectiveKey = ""
+				m.editGroupIdx = -1
 				m.mode = m.returnAfterInput
 				if m.returnAfterInput == modeDetail {
-					m.refreshDetailList()
+					if m.cfg.ValidateRef(m.selRef) == nil {
+						m.refreshDetailList()
+					}
 				}
 				return m, nil
 			case "enter":
@@ -400,6 +436,46 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		m.mode = modeDetail
 		m.refreshDetailList()
 		m.status = "Host duplicated."
+
+	case modeInputNewGroup:
+		name := strings.TrimSpace(m.valueInput.Value())
+		if err := m.cfg.AddGroup(name); err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		m.dirty = true
+		m.rebuildHostList()
+		m.mode = modeTree
+		m.status = fmt.Sprintf("Created group %q.", name)
+
+	case modeInputRenameGroup:
+		name := strings.TrimSpace(m.valueInput.Value())
+		if err := m.cfg.RenameGroup(m.editGroupIdx, name); err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		m.dirty = true
+		m.rebuildHostList()
+		m.editGroupIdx = -1
+		m.mode = modeDetail
+		if m.cfg.ValidateRef(m.selRef) == nil {
+			m.refreshDetailList()
+		}
+		m.status = fmt.Sprintf("Renamed group to %q.", name)
+
+	case modeInputGroupDesc:
+		if err := m.cfg.SetGroupDescription(m.editGroupIdx, m.valueInput.Value()); err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		m.dirty = true
+		m.rebuildHostList()
+		m.editGroupIdx = -1
+		m.mode = modeDetail
+		if m.cfg.ValidateRef(m.selRef) == nil {
+			m.refreshDetailList()
+		}
+		m.status = "Group description updated."
 	}
 	return m, nil
 }
@@ -478,9 +554,29 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "g":
 		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 			m.selRef = row.ref
-			m.openGroupPicker()
+			m.openGroupPicker(modeTree)
 			m.groupPickerList.SetWidth(m.width)
 			m.groupPickerList.SetHeight(max(6, m.height-3))
+			return m, nil
+		}
+
+	case msg.String() == "c":
+		m.returnAfterInput = modeTree
+		m.mode = modeInputNewGroup
+		m.valueInput.SetValue("")
+		m.valueInput.Placeholder = "new group name (not (default))"
+		m.valueInput.Focus()
+		return m, textinput.Blink
+
+	case msg.String() == "D":
+		if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
+			if gh.label == "(default)" {
+				m.status = errStyle.Render("(default) cannot be deleted.")
+				return m, nil
+			}
+			m.pendingDeleteGroupName = gh.label
+			m.mode = modeConfirmDeleteGroup
+			m.status = fmt.Sprintf("Delete group %q and move its hosts to (default)? [y/N]", gh.label)
 			return m, nil
 		}
 	}
@@ -559,6 +655,38 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "v":
 		return m, m.rawEditorCmd()
+
+	case msg.String() == "g":
+		m.openGroupPicker(modeDetail)
+		m.groupPickerList.SetWidth(m.width)
+		m.groupPickerList.SetHeight(max(6, m.height-3))
+		return m, nil
+
+	case msg.String() == "m":
+		if m.selRef.InDefault {
+			m.status = errStyle.Render("Host is in (default); use g to move it to a named group.")
+			return m, nil
+		}
+		m.returnAfterInput = modeDetail
+		m.editGroupIdx = m.selRef.GroupIdx
+		m.mode = modeInputRenameGroup
+		m.valueInput.SetValue(m.cfg.Groups[m.selRef.GroupIdx].Name)
+		m.valueInput.Placeholder = "group name"
+		m.valueInput.Focus()
+		return m, textinput.Blink
+
+	case msg.String() == "o":
+		if m.selRef.InDefault {
+			m.status = errStyle.Render("Host is in (default); no group description.")
+			return m, nil
+		}
+		m.returnAfterInput = modeDetail
+		m.editGroupIdx = m.selRef.GroupIdx
+		m.mode = modeInputGroupDesc
+		m.valueInput.SetValue(groupDescEditPreview(m.cfg.Groups[m.selRef.GroupIdx].Descriptions))
+		m.valueInput.Placeholder = "one-line description (empty clears #@desc)"
+		m.valueInput.Focus()
+		return m, textinput.Blink
 	}
 
 	var cmd tea.Cmd
@@ -597,7 +725,11 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
-		m.mode = modeTree
+		m.mode = m.groupPickerReturnMode
+		m.status = ""
+		if m.groupPickerReturnMode == modeDetail && m.cfg.ValidateRef(m.selRef) == nil {
+			m.refreshDetailList()
+		}
 		return m, nil
 	case msg.String() == "enter":
 		if it, ok := m.groupPickerList.SelectedItem().(groupPickItem); ok {
@@ -634,13 +766,22 @@ func (m Model) View() string {
 		b.WriteString(helpStyle.Render(helpText))
 		return b.String()
 
-	case modeConfirmDeleteHost:
+	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
 		b.WriteString(statusStyle.Render(m.status))
 		b.WriteByte('\n')
 		return b.String()
 
-	case modeInputDirectiveValue, modeInputNewHost, modeInputDuplicateHost:
-		b.WriteString(statusStyle.Render("Enter value, Esc cancel"))
+	case modeInputDirectiveValue, modeInputNewHost, modeInputDuplicateHost, modeInputNewGroup, modeInputRenameGroup, modeInputGroupDesc:
+		switch m.mode {
+		case modeInputNewGroup:
+			b.WriteString(statusStyle.Render("New group name, Esc cancel"))
+		case modeInputRenameGroup:
+			b.WriteString(statusStyle.Render("Rename group, Esc cancel"))
+		case modeInputGroupDesc:
+			b.WriteString(statusStyle.Render("Group #@desc line (empty clears), Esc cancel"))
+		default:
+			b.WriteString(statusStyle.Render("Enter value, Esc cancel"))
+		}
 		b.WriteByte('\n')
 		if m.mode == modeInputDirectiveValue && m.pendingDirectiveKey != "" {
 			b.WriteString(fmt.Sprintf("Directive: %s\n", m.pendingDirectiveKey))
@@ -663,7 +804,7 @@ func (m Model) View() string {
 		v := m.detailList.View()
 		b.WriteString(v)
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter: — | a add | k custom key | e edit value | d del | D dup host | X del host | v raw $EDITOR | s save | esc back"))
+		b.WriteString(statusStyle.Render("enter: — | a add | k custom | e edit val | d del | D dup | g move group | m rename grp | o grp desc | X del host | v raw | s save | esc back"))
 		if m.status != "" {
 			b.WriteByte('\n')
 			b.WriteString(statusStyle.Render(m.status))
@@ -679,13 +820,19 @@ func (m Model) View() string {
 	case modeGroupPicker:
 		b.WriteString(m.groupPickerList.View())
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter: move host here | esc: cancel"))
+		escHint := "tree"
+		if m.groupPickerReturnMode == modeDetail {
+			escHint = "host detail"
+		}
+		b.WriteString(statusStyle.Render("enter: move host here | esc: back to " + escHint))
 		return b.String()
 
 	default: // tree
+		b.WriteString(colHeaderStyle.Render(HostListColumnHeader(m.width)))
+		b.WriteByte('\n')
 		b.WriteString(m.hostList.View())
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter open | n new | x del host | g move group | v raw $EDITOR | s save | r reload | ? | q quit"))
+		b.WriteString(statusStyle.Render("enter open | n host | c new group | D del group | x del host | g move | v raw | s r ? q"))
 		if m.status != "" {
 			b.WriteByte('\n')
 			b.WriteString(statusStyle.Render(m.status))
@@ -698,25 +845,27 @@ const helpText = `
 sshui — SSH client config TUI
 
 Tree
-  enter     Open host directives (group headers are section labels only)
-  /         Filter hosts (searches alias, HostName, User, group name)
-  n         New host (default section)
-  x         Delete host (confirm) — same as X in detail
-  g         Move host to another group / (default)
-  v         Edit serialized config in $EDITOR / VISUAL / EDITOR (see ~/.config/sshui/config.toml)
-  s         Save to file
-  r         Reload from disk (discards unsaved edits)
-  ?         This help
-  q / Q     Quit
+  enter     Open host (group rows are section headers only)
+  Column header row shows: Host (patterns) | HostName | User
+  /         Filter (alias, HostName, User, group name)
+  n         New host under (default)
+  c         Create new empty group
+  D         Delete group (when a group header is selected); hosts → (default); (default) protected
+  x         Delete host (confirm)
+  g         Move selected host to group / (default)
+  v         Raw $EDITOR buffer
+  s / r     Save / reload
+  ? / q     Help / quit
 
 Host detail
-  a         Add directive (catalog picker)
-  k         Add directive with custom key
-  e         Edit selected directive value
-  d         Delete selected directive
-  D         Duplicate host (new Host patterns)
-  X         Delete entire host (confirm); returns to tree after delete
-  v         Raw editor on in-memory buffer (same as tree)
+  a / k     Add directive (picker / custom key)
+  e / d     Edit value / delete directive
+  D         Duplicate host
+  g         Move this host to another group (esc returns here)
+  m         Rename current group (#@group) — not in (default)
+  o         Edit group description (#@desc), one line; empty clears
+  X         Delete host (confirm)
+  v         Raw editor
   s         Save
   esc       Back to tree
 
