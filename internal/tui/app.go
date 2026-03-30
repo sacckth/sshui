@@ -481,11 +481,18 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "q"))):
+	// Always allow force-quit; otherwise let the list own keys while the filter prompt is open.
+	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
 		return m, tea.Quit
+	}
+	if m.hostList.SettingFilter() {
+		var cmd tea.Cmd
+		m.hostList, cmd = m.hostList.Update(msg)
+		return m, cmd
+	}
 
-	case key.Matches(msg, key.NewBinding(key.WithKeys("Q"))):
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("q", "Q"))):
 		return m, tea.Quit
 
 	case msg.String() == "?":
@@ -587,6 +594,15 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
+		return m, tea.Quit
+	}
+	if m.detailList.SettingFilter() {
+		var cmd tea.Cmd
+		m.detailList, cmd = m.detailList.Update(msg)
+		return m, cmd
+	}
+
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeTree
@@ -695,6 +711,15 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
+		return m, tea.Quit
+	}
+	if m.pickerList.SettingFilter() {
+		var cmd tea.Cmd
+		m.pickerList, cmd = m.pickerList.Update(msg)
+		return m, cmd
+	}
+
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeDetail
@@ -847,7 +872,7 @@ sshui — SSH client config TUI
 Tree
   enter     Open host (group rows are section headers only)
   Column header row shows: Host (patterns) | HostName | User
-  /         Filter (alias, HostName, User, group name)
+  /         Filter (alias, HostName, User, group name); while typing filter, letter keys go to filter, not shortcuts
   n         New host under (default)
   c         Create new empty group
   D         Delete group (when a group header is selected); hosts → (default); (default) protected
