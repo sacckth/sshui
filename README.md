@@ -69,7 +69,7 @@ Examples assume `sshui` is on your `PATH` (after `go install`, a package install
 
 ```bash
 sshui
-sshui --config /path/to/config
+sshui --config /path/to/sshconfig
 sshui list
 sshui show myhost --json
 sshui dump --check

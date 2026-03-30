@@ -171,9 +171,9 @@ func newCompactListDelegate() list.DefaultDelegate {
 	d.ShowDescription = false
 	d.SetSpacing(0)
 	d.Styles.FilterMatch = filterMatchStyle
-	d.Styles.NormalTitle = d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0)
+	d.Styles.NormalTitle = styleWithPaneBG(d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0))
 	d.Styles.SelectedTitle = listSelectedTitleStyle
-	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0)
+	d.Styles.DimmedTitle = styleWithPaneBG(d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0))
 	return d
 }
 
@@ -183,10 +183,10 @@ func newDetailListDelegate() list.DefaultDelegate {
 	d.SetSpacing(0)
 	d.Styles.FilterMatch = filterMatchStyle
 	// Zero default left padding and border mismatch so selected rows don't shift horizontally.
-	d.Styles.NormalTitle = d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0)
-	d.Styles.NormalDesc = d.Styles.NormalDesc.Copy().Padding(0, 0, 0, 0)
-	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0)
-	d.Styles.DimmedDesc = d.Styles.DimmedDesc.Copy().Padding(0, 0, 0, 0)
+	d.Styles.NormalTitle = styleWithPaneBG(d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0))
+	d.Styles.NormalDesc = styleWithPaneBG(d.Styles.NormalDesc.Copy().Padding(0, 0, 0, 0))
+	d.Styles.DimmedTitle = styleWithPaneBG(d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0))
+	d.Styles.DimmedDesc = styleWithPaneBG(d.Styles.DimmedDesc.Copy().Padding(0, 0, 0, 0))
 	d.Styles.SelectedTitle = listSelectedTitleStyle
 	d.Styles.SelectedDesc = listSelectedDescStyle
 	return d
@@ -207,9 +207,58 @@ func (h hostTreeDelegate) Spacing() int { return h.inner.Spacing() }
 
 func (h hostTreeDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return h.inner.Update(msg, m) }
 
+// renderHostTreeRow draws host rows with selection visible during filter editing (unlike bubbles DefaultDelegate).
+func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s *list.DefaultItemStyles) {
+	title := row.Title()
+	if m.Width() <= 0 {
+		return
+	}
+	pl := s.NormalTitle.GetPaddingLeft()
+	pr := s.NormalTitle.GetPaddingRight()
+	textwidth := m.Width() - pl - pr
+	if textwidth < 4 {
+		textwidth = 4
+	}
+	title = ansi.Truncate(title, textwidth, listEllipsis)
+
+	var (
+		matchedRunes []int
+		emptyFilter  = m.FilterState() == list.Filtering && m.FilterValue() == ""
+		isFiltered   = m.FilterState() == list.Filtering || m.FilterState() == list.FilterApplied
+		isSelected   = index == m.Index()
+	)
+	if isFiltered && index < len(m.VisibleItems()) {
+		matchedRunes = m.MatchesForItem(index)
+	}
+
+	if emptyFilter {
+		_, _ = fmt.Fprint(w, s.DimmedTitle.Render(title))
+		return
+	}
+	if isSelected {
+		if isFiltered {
+			unmatched := s.SelectedTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		_, _ = fmt.Fprint(w, s.SelectedTitle.Render(title))
+		return
+	}
+	if isFiltered {
+		unmatched := s.NormalTitle.Inline(true)
+		matched := unmatched.Copy().Inherit(s.FilterMatch)
+		title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+	}
+	_, _ = fmt.Fprint(w, s.NormalTitle.Render(title))
+}
+
 func (h hostTreeDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	if gh, ok := item.(groupHeaderEntry); ok {
 		renderGroupHeaderRow(w, m, index, gh)
+		return
+	}
+	if row, ok := item.(hostRowEntry); ok {
+		renderHostTreeRow(w, m, index, row, &h.inner.Styles)
 		return
 	}
 	h.inner.Render(w, m, index, item)
@@ -230,13 +279,14 @@ func renderGroupHeaderRow(w io.Writer, m list.Model, index int, gh groupHeaderEn
 		isSelected   = index == m.Index()
 	)
 
-	if isFiltered {
+	if isFiltered && index < len(m.VisibleItems()) {
 		matchedRunes = m.MatchesForItem(index)
 	}
 
 	if emptyFilter {
 		title = groupHeaderDimStyle.Render(title)
-	} else if isSelected && m.FilterState() != list.Filtering {
+	} else if isSelected {
+		// Keep selection visible while typing the filter (bubbles hides it for DefaultDelegate).
 		if isFiltered {
 			unmatched := groupHeaderSelectedStyle.Inline(true)
 			matched := unmatched.Copy().Inherit(filterMatchStyle)

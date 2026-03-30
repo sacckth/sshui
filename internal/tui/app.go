@@ -99,6 +99,9 @@ type Model struct {
 	themeName        string
 	appCfgReturnMode viewMode
 	appCfgViewport   viewport.Model
+
+	helpViewport   viewport.Model
+	helpReturnMode viewMode
 }
 
 var (
@@ -159,6 +162,8 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 	m.hostList = l
+	patchFilterAcceptKeys(&m.hostList)
+	applyPaneChromeToList(&m.hostList)
 	for i, it := range m.hostList.Items() {
 		if row, ok := it.(hostRowEntry); ok {
 			m.selRef = row.ref
@@ -216,21 +221,39 @@ func (m *Model) hostListFilterSnap() hostListFilterSnap {
 	return hostListFilterSnap{state: m.hostList.FilterState(), value: m.hostList.FilterValue()}
 }
 
+// skipRebuildWhenApplyingFilter avoids rebuildHostList on Enter: bubbles' SetItems clears
+// filteredItems and refilters asynchronously, so VisibleItems() is empty for a frame and
+// syncTreeSelection would call Select() with a full-list index (wrong for filtered lists).
+func skipRebuildWhenApplyingFilter(before, after hostListFilterSnap) bool {
+	return before.state == list.Filtering && after.state == list.FilterApplied && before.value == after.value
+}
+
 func (m *Model) updateHostList(msg tea.Msg) tea.Cmd {
 	before := m.hostListFilterSnap()
 	var cmd tea.Cmd
 	m.hostList, cmd = m.hostList.Update(msg)
-	if m.hostListFilterSnap() != before {
-		m.rebuildHostList()
+	// SetItems schedules async refilter; selection must run after matches exist.
+	if _, ok := msg.(list.FilterMatchesMsg); ok && m.hostList.FilterState() != list.Unfiltered {
+		m.syncTreeSelection()
+	}
+	after := m.hostListFilterSnap()
+	if after != before && !skipRebuildWhenApplyingFilter(before, after) {
+		rbCmd := m.rebuildHostList()
+		cmd = tea.Batch(cmd, rbCmd)
 	}
 	return cmd
 }
 
-func (m *Model) rebuildHostList() {
+// rebuildHostList replaces host list items. When a filter is active, SetItems clears matches until
+// FilterMatchesMsg is processed — callers must return the returned tea.Cmd so refilter runs.
+func (m *Model) rebuildHostList() tea.Cmd {
 	lw := m.leftPaneWidth()
 	items := buildHostItems(m.cfg, lw, m.collapsedGroups, m.ignoreCollapseForActiveFilter())
-	m.hostList.SetItems(items)
-	m.syncTreeSelection()
+	cmd := m.hostList.SetItems(items)
+	if m.hostList.FilterState() == list.Unfiltered {
+		m.syncTreeSelection()
+	}
+	return cmd
 }
 
 // resyncSelectionAfterStructureChange fixes selRef and list cursor after cfg shape changes.
@@ -240,7 +263,13 @@ func (m *Model) resyncSelectionAfterStructureChange() {
 		m.refreshDetailList()
 		return
 	}
-	for i, it := range m.hostList.Items() {
+	var iterate []list.Item
+	if m.hostList.FilterState() != list.Unfiltered {
+		iterate = m.hostList.VisibleItems()
+	} else {
+		iterate = m.hostList.Items()
+	}
+	for i, it := range iterate {
 		if row, ok := it.(hostRowEntry); ok {
 			m.selRef = row.ref
 			m.hostList.Select(i)
@@ -252,16 +281,17 @@ func (m *Model) resyncSelectionAfterStructureChange() {
 
 // toggleIncludeEditMode switches between merged read-only browse (all Include files) and
 // editable single-file view (main path only). No-op if the file has no Include.
-func (m *Model) toggleIncludeEditMode() {
+// Returns a command when the host list was rebuilt (needed if a filter is active).
+func (m *Model) toggleIncludeEditMode() tea.Cmd {
 	if !m.cfg.HasInclude {
 		m.status = statusStyle.Render("No Include in this file.")
-		return
+		return nil
 	}
 	if m.readOnly {
 		data, err := os.ReadFile(m.path)
 		if err != nil && !os.IsNotExist(err) {
 			m.status = errStyle.Render("Read: " + err.Error())
-			return
+			return nil
 		}
 		var cfg *scfg.Config
 		if len(data) == 0 {
@@ -270,26 +300,26 @@ func (m *Model) toggleIncludeEditMode() {
 			cfg, err = scfg.Parse(strings.NewReader(string(data)))
 			if err != nil {
 				m.status = errStyle.Render("Parse: " + err.Error())
-				return
+				return nil
 			}
 		}
 		m.cfg = cfg
 		m.readOnly = false
 		m.dirty = false
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.layoutDetailPanes()
 		m.resyncSelectionAfterStructureChange()
 		m.status = fmt.Sprintf("Writable: only %s (included hosts hidden). Save writes this file. Press W or r for merged read-only browse.", m.path)
-		return
+		return rb
 	}
 	if m.dirty {
 		m.status = errStyle.Render("Save (s) or reload (r) before switching back to merged Include view.")
-		return
+		return nil
 	}
 	data, err := os.ReadFile(m.path)
 	if err != nil && !os.IsNotExist(err) {
 		m.status = errStyle.Render("Read: " + err.Error())
-		return
+		return nil
 	}
 	var cfg *scfg.Config
 	if len(data) == 0 {
@@ -298,25 +328,26 @@ func (m *Model) toggleIncludeEditMode() {
 		cfg, err = scfg.Parse(strings.NewReader(string(data)))
 		if err != nil {
 			m.status = errStyle.Render("Parse: " + err.Error())
-			return
+			return nil
 		}
 	}
 	if !cfg.HasInclude {
 		m.status = errStyle.Render("Include was removed on disk; staying in single-file view.")
 		m.cfg = cfg
 		m.readOnly = false
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.layoutDetailPanes()
 		m.resyncSelectionAfterStructureChange()
-		return
+		return rb
 	}
 	m.cfg = scfg.MergeIncludes(m.path, cfg)
 	m.readOnly = true
 	m.dirty = false
-	m.rebuildHostList()
+	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
 	m.resyncSelectionAfterStructureChange()
 	m.status = "Merged read-only browse (all Include files). W = edit main file only."
+	return rb
 }
 
 func (m *Model) openGroupPicker(returnTo viewMode) {
@@ -337,6 +368,7 @@ func (m *Model) openGroupPicker(returnTo viewMode) {
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
+	applyPaneChromeToList(&l)
 	m.groupPickerList = l
 	m.mode = modeGroupPicker
 }
@@ -402,7 +434,13 @@ func (m *Model) syncBrowsePreview() {
 }
 
 func (m *Model) syncTreeSelection() {
-	items := m.hostList.Items()
+	// list.Select expects an index into VisibleItems(), not the underlying Items() slice.
+	var items []list.Item
+	if m.hostList.FilterState() != list.Unfiltered {
+		items = m.hostList.VisibleItems()
+	} else {
+		items = m.hostList.Items()
+	}
 	for i, it := range items {
 		if row, ok := it.(hostRowEntry); ok &&
 			row.ref.InDefault == m.selRef.InDefault &&
@@ -475,6 +513,8 @@ func (m *Model) newDetailList() list.Model {
 	filterOK := m.cfg.ValidateRef(m.selRef) == nil
 	l.SetFilteringEnabled(filterOK && (m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity))
 	l.DisableQuitKeybindings()
+	patchFilterAcceptKeys(&l)
+	applyPaneChromeToList(&l)
 	return l
 }
 
@@ -490,12 +530,10 @@ func detailTabTitle(t detailTab) string {
 }
 
 func (m *Model) overviewPanel() string {
+	rw := max(1, m.rightPaneWidth()-2)
+	boxStyle := paneRightStyle.Copy().Border(panelBorder).Padding(0, 1).Width(rw)
 	if m.cfg.ValidateRef(m.selRef) != nil {
-		return lipgloss.NewStyle().
-			Border(panelBorder).
-			Padding(0, 1).
-			Width(m.rightPaneWidth() - 2).
-			Render(statusStyle.Render("No host selected."))
+		return boxStyle.Render(statusStyle.Render("No host selected."))
 	}
 	h := m.cfg.HostAt(m.selRef)
 	var b strings.Builder
@@ -512,12 +550,7 @@ func (m *Model) overviewPanel() string {
 	b.WriteString(fmt.Sprintf("User: %s\n", firstStr(directiveValue(h, "User", "user"), "—")))
 	b.WriteString(fmt.Sprintf("Port: %s\n", firstStr(directiveValue(h, "Port", "port"), "—")))
 	b.WriteString(fmt.Sprintf("IdentityFile: %s\n", firstStr(directiveValue(h, "IdentityFile", "identityfile"), "—")))
-	box := lipgloss.NewStyle().
-		Border(panelBorder).
-		Padding(0, 1).
-		Width(m.rightPaneWidth() - 2).
-		Render(strings.TrimSuffix(b.String(), "\n"))
-	return box
+	return boxStyle.Render(strings.TrimSuffix(b.String(), "\n"))
 }
 
 func firstStr(s, def string) string {
@@ -545,6 +578,8 @@ func (m *Model) openPicker() {
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
+	patchFilterAcceptKeys(&l)
+	applyPaneChromeToList(&l)
 	m.pickerList = l
 	m.mode = modePicker
 }
@@ -612,6 +647,51 @@ func sshConnectAlias(h *scfg.HostBlock) (string, bool) {
 	return p, true
 }
 
+// actionMenuOuterWidth is the framed actions modal width.
+func actionMenuOuterWidth(termW int) int {
+	return min(56, termW-4)
+}
+
+// actionMenuListHeight is the bubbles list height: one line is reserved for the host subtitle
+// rendered above the list body (outside the list, inside the frame).
+func actionMenuListHeight(termH int) int {
+	box := min(8, max(5, termH-4))
+	return max(4, box-1)
+}
+
+// actionMenuTargetText is the host line shown under "Actions".
+func (m *Model) actionMenuTargetText() string {
+	if m.cfg.ValidateRef(m.selRef) != nil {
+		return "Host: —"
+	}
+	return "Host: " + hostAlias(m.cfg.HostAt(m.selRef))
+}
+
+func actionMenuTargetLineStyle() lipgloss.Style {
+	if paneFillActive {
+		return statusStyle.Copy().Background(paneFill)
+	}
+	return statusStyle
+}
+
+// renderActionMenuBox draws the actions list with the same pane fill as split view (border, padded
+// lines) so list help and JoinVertical gaps are not on the terminal default background.
+func (m *Model) renderActionMenuBox() string {
+	lw := actionMenuOuterWidth(m.width)
+	ll := m.actionMenuList
+	titleBlock := ll.Styles.TitleBar.Render(ll.Styles.Title.Render("Actions"))
+	targetLine := actionMenuTargetLineStyle().Render(m.actionMenuTargetText())
+	raw := titleBlock + "\n" + targetLine + "\n" + ll.View()
+	if paneFillActive {
+		raw = padVisualLines(raw, lw)
+	}
+	box := lipgloss.NewStyle().Border(panelBorder).Padding(0, 1).Width(lw)
+	if paneFillActive {
+		box = box.Background(paneFill)
+	}
+	return box.Render(raw)
+}
+
 func (m *Model) openActionMenu(returnTo viewMode) {
 	m.actionReturnMode = returnTo
 	if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok && returnTo == modeTree {
@@ -625,11 +705,19 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 	}
 	d := list.NewDefaultDelegate()
 	d.ShowDescription = true
-	l := list.New(items, d, min(56, m.width-4), min(8, m.height-4))
+	d.Styles.NormalTitle = styleWithPaneBG(d.Styles.NormalTitle)
+	d.Styles.NormalDesc = styleWithPaneBG(d.Styles.NormalDesc)
+	d.Styles.SelectedTitle = listSelectedTitleStyle
+	d.Styles.SelectedDesc = listSelectedDescStyle
+	lw := actionMenuOuterWidth(m.width)
+	lh := actionMenuListHeight(m.height)
+	l := list.New(items, d, lw, lh)
 	l.Title = "Actions"
 	l.Styles.Title = titleStyle
+	l.SetShowTitle(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
+	applyPaneChromeToList(&l)
 	m.actionMenuList = l
 	m.mode = modeActionMenu
 }
@@ -653,11 +741,11 @@ func (m *Model) sshExecCmd(sftp bool) tea.Cmd {
 	})
 }
 
-func (m *Model) reloadFromDisk() {
+func (m *Model) reloadFromDisk() tea.Cmd {
 	data, err := os.ReadFile(m.path)
 	if err != nil && !os.IsNotExist(err) {
 		m.status = errStyle.Render("Reload: " + err.Error())
-		return
+		return nil
 	}
 	var cfg *scfg.Config
 	if len(data) == 0 {
@@ -666,7 +754,7 @@ func (m *Model) reloadFromDisk() {
 		cfg, err = scfg.Parse(strings.NewReader(string(data)))
 		if err != nil {
 			m.status = errStyle.Render("Reload parse: " + err.Error())
-			return
+			return nil
 		}
 	}
 	if cfg.HasInclude {
@@ -677,10 +765,11 @@ func (m *Model) reloadFromDisk() {
 		m.readOnly = false
 	}
 	m.dirty = false
-	m.rebuildHostList()
+	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
 	m.syncBrowsePreview()
 	m.status = "Reloaded from disk."
+	return rb
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -691,8 +780,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeTree, modeDetail:
 			m.layoutDetailPanes()
-			m.rebuildHostList()
+			rb := m.rebuildHostList()
 			m.detailList = m.newDetailList()
+			return m, rb
 		default:
 			m.hostList.SetWidth(msg.Width)
 			m.hostList.SetHeight(max(6, msg.Height-4))
@@ -706,11 +796,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.groupPickerList.SetHeight(max(6, msg.Height-3))
 		}
 		if m.mode == modeActionMenu {
-			m.actionMenuList.SetWidth(min(56, msg.Width-4))
-			m.actionMenuList.SetHeight(min(8, msg.Height-4))
+			m.actionMenuList.SetWidth(actionMenuOuterWidth(msg.Width))
+			m.actionMenuList.SetHeight(actionMenuListHeight(msg.Height))
 		}
 		if m.mode == modeAppCfgView {
 			m.layoutAppCfgViewport()
+		}
+		if m.mode == modeHelp {
+			m.layoutHelpViewport()
 		}
 		return m, nil
 
@@ -749,10 +842,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch m.mode {
 		case modeHelp:
-			m.mode = modeTree
-			m.layoutDetailPanes()
-			m.refreshDetailList()
-			return m, nil
+			if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
+				return m, tea.Quit
+			}
+			if key.Matches(msg, key.NewBinding(key.WithKeys("esc"))) {
+				m.mode = m.helpReturnMode
+				m.layoutDetailPanes()
+				if m.mode == modeDetail {
+					m.refreshDetailList()
+				}
+				return m, nil
+			}
+			var vcmd tea.Cmd
+			m.helpViewport, vcmd = m.helpViewport.Update(msg)
+			return m, vcmd
 
 		case modeConfirmDeleteHost:
 			switch msg.String() {
@@ -773,10 +876,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.dirty = true
 				m.mode = modeTree
 				m.layoutDetailPanes()
-				m.rebuildHostList()
+				rb := m.rebuildHostList()
 				m.syncBrowsePreview()
 				m.refreshDetailList()
 				m.status = "Host deleted."
+				return m, rb
 			case "n", "N", "esc":
 				m.status = ""
 				m.mode = m.confirmReturnMode
@@ -827,9 +931,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingDeleteGroupName = ""
 				m.mode = modeTree
 				m.layoutDetailPanes()
-				m.rebuildHostList()
-				m.syncTreeSelection()
+				rb := m.rebuildHostList()
 				m.refreshDetailList()
+				return m, rb
 			case "n", "N", "esc":
 				m.status = ""
 				m.pendingDeleteGroupName = ""
@@ -903,6 +1007,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.mode == modeHelp {
+		var cmd tea.Cmd
+		m.helpViewport, cmd = m.helpViewport.Update(msg)
+		return m, cmd
+	}
+
 	cmd := m.updateHostList(msg)
 	return m, cmd
 }
@@ -947,11 +1057,12 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		}
 		m.cfg.DefaultHosts = append(m.cfg.DefaultHosts, scfg.HostBlock{Patterns: pat})
 		m.dirty = true
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.selRef = scfg.HostRef{InDefault: true, HostIdx: len(m.cfg.DefaultHosts) - 1}
 		m.mode = modeDetail
 		m.refreshDetailList()
 		m.status = "New host created."
+		return m, rb
 
 	case modeInputDuplicateHost:
 		pat := strings.Fields(m.valueInput.Value())
@@ -964,7 +1075,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dirty = true
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		// Move selection to duplicated block (inserted after current)
 		ref := m.selRef
 		ref.HostIdx++
@@ -974,6 +1085,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		m.mode = modeDetail
 		m.refreshDetailList()
 		m.status = "Host duplicated."
+		return m, rb
 
 	case modeInputNewGroup:
 		name := strings.TrimSpace(m.valueInput.Value())
@@ -984,9 +1096,10 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		m.dirty = true
 		m.mode = modeTree
 		m.layoutDetailPanes()
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.refreshDetailList()
 		m.status = fmt.Sprintf("Created group %q.", name)
+		return m, rb
 
 	case modeInputRenameGroup:
 		name := strings.TrimSpace(m.valueInput.Value())
@@ -995,13 +1108,14 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dirty = true
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.editGroupIdx = -1
 		m.mode = modeDetail
 		if m.cfg.ValidateRef(m.selRef) == nil {
 			m.refreshDetailList()
 		}
 		m.status = fmt.Sprintf("Renamed group to %q.", name)
+		return m, rb
 
 	case modeInputGroupDesc:
 		if err := m.cfg.SetGroupDescription(m.editGroupIdx, m.valueInput.Value()); err != nil {
@@ -1009,13 +1123,14 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dirty = true
-		m.rebuildHostList()
+		rb := m.rebuildHostList()
 		m.editGroupIdx = -1
 		m.mode = modeDetail
 		if m.cfg.ValidateRef(m.selRef) == nil {
 			m.refreshDetailList()
 		}
 		m.status = "Group description updated."
+		return m, rb
 
 	case modeInputHostMeta:
 		lines := strings.Split(m.valueInput.Value(), "\n")
@@ -1051,6 +1166,14 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.syncBrowsePreview()
 			return m, nil
 		}
+		if isEnterKey(msg) {
+			cmd := m.updateHostList(msg)
+			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+				m.openDetail(row.ref)
+			}
+			m.syncBrowsePreview()
+			return m, cmd
+		}
 		cmd := m.updateHostList(msg)
 		m.syncBrowsePreview()
 		return m, cmd
@@ -1066,9 +1189,9 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !m.collapsedGroups[gh.label] {
 				delete(m.collapsedGroups, gh.label)
 			}
-			m.rebuildHostList()
+			rb := m.rebuildHostList()
 			m.syncBrowsePreview()
-			return m, nil
+			return m, rb
 		}
 
 	case msg.String() == "$":
@@ -1078,7 +1201,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openAppConfigView(modeTree)
 
 	case msg.String() == "?":
-		m.mode = modeHelp
+		m.openHelp(modeTree)
 		return m, nil
 
 	case msg.String() == "s":
@@ -1090,18 +1213,16 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "r":
-		m.reloadFromDisk()
-		return m, nil
+		return m, m.reloadFromDisk()
 
 	case msg.String() == "W":
-		m.toggleIncludeEditMode()
-		return m, nil
+		return m, m.toggleIncludeEditMode()
 
 	case msg.String() == "A":
 		if _, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 			m.openActionMenu(modeTree)
-			m.actionMenuList.SetWidth(min(56, m.width-4))
-			m.actionMenuList.SetHeight(min(8, m.height-4))
+			m.actionMenuList.SetWidth(actionMenuOuterWidth(m.width))
+			m.actionMenuList.SetHeight(actionMenuListHeight(m.height))
 			return m, nil
 		}
 
@@ -1190,16 +1311,31 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if msg.String() == "W" {
-		m.toggleIncludeEditMode()
+		rb := m.toggleIncludeEditMode()
 		m.layoutDetailPanes()
 		m.refreshDetailList()
-		return m, nil
+		return m, rb
 	}
 
 	if m.treePaneFocused {
 		if m.hostList.SettingFilter() {
 			if tryFilterListArrowNav(&m.hostList, msg) {
+				if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+					m.selRef = row.ref
+					m.refreshDetailList()
+				}
 				return m, nil
+			}
+			if isEnterKey(msg) {
+				cmd := m.updateHostList(msg)
+				if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+					m.selRef = row.ref
+					m.detailTab = detailTabAll
+					m.treePaneFocused = false
+					m.refreshDetailList()
+					m.layoutDetailPanes()
+				}
+				return m, cmd
 			}
 			cmd := m.updateHostList(msg)
 			return m, cmd
@@ -1214,9 +1350,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if !m.collapsedGroups[gh.label] {
 					delete(m.collapsedGroups, gh.label)
 				}
-				m.rebuildHostList()
-				m.syncTreeSelection()
-				return m, nil
+				return m, m.rebuildHostList()
 			}
 		case msg.String() == "$":
 			return m, m.openAppConfigEditor()
@@ -1234,8 +1368,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.mode = modeTree
 			m.layoutDetailPanes()
-			m.rebuildHostList()
-			return m, nil
+			return m, m.rebuildHostList()
 		}
 		cmd := m.updateHostList(msg)
 		return m, cmd
@@ -1257,6 +1390,9 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.treePaneFocused = true
 		m.syncTreeSelection()
 		return m, nil
+	case msg.String() == "?":
+		m.openHelp(modeDetail)
+		return m, nil
 	case msg.String() == "t":
 		m.detailTab = (m.detailTab + 1) % 3
 		m.refreshDetailList()
@@ -1265,8 +1401,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeTree
 		m.layoutDetailPanes()
-		m.rebuildHostList()
-		return m, nil
+		return m, m.rebuildHostList()
 	case msg.String() == "$":
 		return m, m.openAppConfigEditor()
 	case msg.String() == "&":
@@ -1280,8 +1415,8 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case msg.String() == "A":
 		m.openActionMenu(modeDetail)
-		m.actionMenuList.SetWidth(min(56, m.width-4))
-		m.actionMenuList.SetHeight(min(8, m.height-4))
+		m.actionMenuList.SetWidth(actionMenuOuterWidth(m.width))
+		m.actionMenuList.SetHeight(actionMenuListHeight(m.height))
 		return m, nil
 	case msg.String() == "i":
 		if m.readOnlyBlocked() {
@@ -1558,15 +1693,14 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.mode = m.groupPickerReturnMode
 			m.layoutDetailPanes()
-			m.rebuildHostList()
-			m.syncTreeSelection()
+			rb := m.rebuildHostList()
 			if m.mode == modeDetail {
 				m.refreshDetailList()
 			} else {
 				m.syncBrowsePreview()
 				m.refreshDetailList()
 			}
-			return m, nil
+			return m, rb
 		}
 	}
 	var cmd tea.Cmd
@@ -1613,6 +1747,10 @@ func paneSepLines(height int) string {
 func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int) string {
 	lw := m.leftPaneWidth()
 	rw := m.rightPaneWidth()
+	leftBody = padVisualLines(leftBody, lw)
+	rightBody = padVisualLines(rightBody, rw)
+	leftBody = ensureMinVisualLines(leftBody, lw, paneHeight)
+	rightBody = ensureMinVisualLines(rightBody, rw, paneHeight)
 	leftBox := paneLeftStyle.Width(lw).Height(paneHeight).Render(leftBody)
 	rightBox := paneRightStyle.Width(rw).Height(paneHeight).Render(rightBody)
 	sep := paneSepStyle.Render(paneSepLines(paneHeight))
@@ -1658,7 +1796,13 @@ func (m Model) View() string {
 	}
 	switch m.mode {
 	case modeHelp:
-		b.WriteString(helpStyle.Render(helpText))
+		title := titleStyle.Render("sshui — help")
+		hint := statusStyle.Render("Esc — close help (only Esc exits) · ↑↓ PgUp/PgDn Space scroll")
+		body := m.helpViewport.View()
+		box := lipgloss.JoinVertical(lipgloss.Left, title, "", body, "", hint)
+		innerW := min(max(48, m.width-4), m.width-2)
+		framed := lipgloss.NewStyle().Border(panelBorder).Padding(0, 1).Width(innerW).Render(box)
+		b.WriteString(lipgloss.Place(m.width, max(12, m.height-2), lipgloss.Center, lipgloss.Top, framed))
 		return b.String()
 
 	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
@@ -1667,7 +1811,7 @@ func (m Model) View() string {
 		return b.String()
 
 	case modeActionMenu:
-		menu := lipgloss.NewStyle().Border(panelBorder).Padding(0, 1).Render(m.actionMenuList.View())
+		menu := m.renderActionMenuBox()
 		b.WriteString(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, menu))
 		return b.String()
 
@@ -1748,7 +1892,7 @@ func (m Model) View() string {
 		if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
 			right = m.detailList.View()
 		} else {
-			right = lipgloss.NewStyle().
+			right = paneRightStyle.Copy().
 				Padding(1, 1).
 				Foreground(lipgloss.Color("245")).
 				Render("Select a host row to preview directives.\n\nTip: c creates a group; header: z fold, D delete group.")
@@ -1769,7 +1913,7 @@ Browse (split view)
   Left: Host patterns only, grouped under (default) and #@group sections
   Right: directive preview for the selected host row
   enter     Open full editor (tabs, add/remove directives, …)
-  /         Filter host list by the visible Host column (fuzzy match + highlight); with 2+ matches, ↑↓ or k/j moves selection before Enter applies
+  /         Filter host list; ↑↓ or k/j move among matches (left pane shows selection); Enter applies filter and opens host detail (or focuses the right pane if already in detail)
   z         Collapse/expand group (when a group header row is selected)
   A         Actions: ssh / sftp / copy command (host row)
   n         New host under (default)
@@ -1782,7 +1926,8 @@ Browse (split view)
   &         View sshui app config in a read-only scrollable pane (esc/q close)
   s / r     Save / reload
   W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
-  ? / q     Help / quit
+  ?         Open this help (scroll with arrows / PgUp / PgDn / Space; Esc closes help only)
+  q         Quit (from browse)
 
 Include / read-only (merged view)
   If your config contains an Include directive, sshui may start in read-only merged mode: it loads

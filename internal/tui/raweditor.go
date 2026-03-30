@@ -96,7 +96,7 @@ func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, te
 		m.readOnly = false
 	}
 	m.dirty = true
-	m.rebuildHostList()
+	rb := m.rebuildHostList()
 	if m.mode == modeDetail {
 		if m.cfg.ValidateRef(m.selRef) != nil {
 			m.mode = modeTree
@@ -113,5 +113,5 @@ func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, te
 	if msg.err != nil {
 		m.status += " " + statusStyle.Render("(editor process: "+msg.err.Error()+")")
 	}
-	return m, nil
+	return m, rb
 }
