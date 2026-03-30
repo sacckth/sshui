@@ -8,8 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/schavezc/sshui/internal/config"
-	"github.com/schavezc/sshui/internal/tui"
+	"github.com/sacckth/sshui/internal/appcfg"
+	"github.com/sacckth/sshui/internal/config"
+	"github.com/sacckth/sshui/internal/tui"
 )
 
 var (
@@ -24,7 +25,7 @@ func main() {
 		Long:  "Edit OpenSSH client configuration with a keyboard-driven TUI. Backs up are recommended before save.",
 		RunE:  run,
 	}
-	root.Flags().StringVar(&cfgPath, "config", "", "Path to ssh config (default: $SSH_CONFIG or ~/.ssh/config)")
+	root.Flags().StringVar(&cfgPath, "config", "", "SSH config path (overrides $SSH_CONFIG and app config; default chain in README)")
 	root.Version = version
 	root.SetVersionTemplate("{{.Version}}\n")
 
@@ -38,9 +39,16 @@ func run(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("unexpected arguments: %v", args)
 	}
+	ac, err := appcfg.Load()
+	if err != nil {
+		return err
+	}
 	path := cfgPath
 	if path == "" {
 		path = os.Getenv("SSH_CONFIG")
+	}
+	if path == "" {
+		path = ac.SSHConfig
 	}
 	if path == "" {
 		home, err := os.UserHomeDir()
@@ -49,7 +57,7 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 		path = filepath.Join(home, ".ssh", "config")
 	}
-	path, err := filepath.Abs(path)
+	path, err = filepath.Abs(path)
 	if err != nil {
 		return err
 	}
@@ -68,7 +76,7 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	p := tui.InitProgram(cfg, path)
+	p := tui.InitProgram(cfg, path, tui.Options{Theme: ac.Theme, Editor: ac.Editor})
 	final, err := p.Run()
 	if err != nil {
 		return err

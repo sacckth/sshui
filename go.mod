@@ -1,4 +1,4 @@
-module github.com/schavezc/sshui
+module github.com/sacckth/sshui
 
 go 1.22
 
@@ -6,6 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v0.26.6
 	github.com/charmbracelet/lipgloss v0.11.0
+	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/spf13/cobra v1.8.1
 )
 

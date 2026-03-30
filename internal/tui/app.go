@@ -11,9 +11,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	scfg "github.com/schavezc/sshui/internal/config"
-	"github.com/schavezc/sshui/internal/sshkeywords"
+	scfg "github.com/sacckth/sshui/internal/config"
+	"github.com/sacckth/sshui/internal/sshkeywords"
 )
+
+// Options carries theme and editor preferences (from ~/.config/sshui/config.toml).
+type Options struct {
+	Theme  string
+	Editor string
+}
 
 type viewMode int
 
@@ -49,6 +55,7 @@ type Model struct {
 	pendingDirectiveKey  string
 	editDirectiveIndex   int // >=0 when editing value; -1 when adding
 	status               string
+	editor               string // from app config; VISUAL/EDITOR used when empty
 }
 
 var (
@@ -59,7 +66,8 @@ var (
 )
 
 // New builds a TUI model for the given config path and parsed config.
-func New(cfg *scfg.Config, path string) *Model {
+func New(cfg *scfg.Config, path string, opts Options) *Model {
+	applyTheme(opts.Theme)
 	w, h := 80, 24
 	hostItems := buildHostItems(cfg)
 	delegate := list.NewDefaultDelegate()
@@ -89,6 +97,7 @@ func New(cfg *scfg.Config, path string) *Model {
 		valueInput:         ti,
 		keyInput:           ki,
 		editDirectiveIndex: -1,
+		editor:             opts.Editor,
 	}
 }
 
@@ -97,8 +106,8 @@ func (m *Model) Init() tea.Cmd {
 }
 
 // InitProgram returns a prepared tea.Program.
-func InitProgram(cfg *scfg.Config, path string) *tea.Program {
-	return tea.NewProgram(New(cfg, path), tea.WithAltScreen())
+func InitProgram(cfg *scfg.Config, path string, opts Options) *tea.Program {
+	return tea.NewProgram(New(cfg, path, opts), tea.WithAltScreen())
 }
 
 type hostEntry struct {
@@ -236,6 +245,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pickerList.SetWidth(msg.Width)
 			m.pickerList.SetHeight(max(6, msg.Height-3))
 		}
+		return m, nil
+
+	case rawEditorFinishedMsg:
+		return m.handleRawEditorFinished(msg)
+
+	case rawEditorErrMsg:
+		m.status = errStyle.Render(msg.err.Error())
 		return m, nil
 
 	case tea.KeyMsg:
@@ -414,6 +430,9 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.valueInput.Focus()
 		return m, textinput.Blink
 
+	case msg.String() == "v":
+		return m, m.rawEditorCmd()
+
 	case msg.String() == "enter":
 		if it, ok := m.hostList.SelectedItem().(hostEntry); ok {
 			m.openDetail(it.ref)
@@ -488,6 +507,9 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeConfirmDeleteHost
 		m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
 		return m, nil
+
+	case msg.String() == "v":
+		return m, m.rawEditorCmd()
 	}
 
 	var cmd tea.Cmd
@@ -568,7 +590,7 @@ func (m Model) View() string {
 		v := m.detailList.View()
 		b.WriteString(v)
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter: — | a add | k custom key | e edit value | d del | D dup host | X del host | s save | esc back"))
+		b.WriteString(statusStyle.Render("enter: — | a add | k custom key | e edit value | d del | D dup host | X del host | v raw $EDITOR | s save | esc back"))
 		if m.status != "" {
 			b.WriteByte('\n')
 			b.WriteString(statusStyle.Render(m.status))
@@ -584,7 +606,7 @@ func (m Model) View() string {
 	default: // tree
 		b.WriteString(m.hostList.View())
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter: open | n new host | s save | r reload | ? help | q quit"))
+		b.WriteString(statusStyle.Render("enter: open | n new host | v raw $EDITOR | s save | r reload | ? help | q quit"))
 		if m.status != "" {
 			b.WriteByte('\n')
 			b.WriteString(statusStyle.Render(m.status))
@@ -600,6 +622,7 @@ Tree
   enter     Open host directives
   /         Filter hosts
   n         New host (default section)
+  v         Edit serialized config in $EDITOR / VISUAL / EDITOR (see ~/.config/sshui/config.toml)
   s         Save to file
   r         Reload from disk (discards unsaved edits)
   ?         This help
@@ -612,8 +635,11 @@ Host detail
   d         Delete selected directive
   D         Duplicate host (new Host patterns)
   X         Delete entire host (confirm)
+  v         Raw editor on in-memory buffer (same as tree)
   s         Save
   esc       Back to tree
+
+Optional: ~/.config/sshui/config.toml — ssh_config, editor, theme (default|warm|muted).
 
 Back up ~/.ssh/config before heavy use; saving rewrites the file with stable formatting.
 `
