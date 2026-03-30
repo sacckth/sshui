@@ -24,10 +24,13 @@ Optional TOML (macOS: `~/Library/Application Support/sshui/config.toml`). All ke
 | `theme` | `default`, `warm`, or `muted` (Lip Gloss accents) |
 | `ssh_config_git_mirror` | After each successful save, write the same bytes here (e.g. `~/src/dotfiles/ssh/config`); parents are created; `0600` |
 
-Set `NO_COLOR=1` to disable ANSI colors in the TUI.
+Set `NO_COLOR=1` to disable ANSI colors in the TUI (pane backgrounds and list chrome are subdued).
+
+In the TUI, **`$`** opens this file in `$EDITOR` and **`&`** shows it in a read-only scroller (after editing, theme/editor/mirror settings reload when the editor exits).
 
 ## Features
 
+- Split panes with distinct backgrounds, a vertical separator, and a footer rule; group headers use bold+italic styling; **`z`** folds a group when its header row is selected (filtering temporarily shows hosts under folded groups)
 - Split host detail: tree + Overview / all directives / Connectivity tabs; `tab` switches pane focus
 - sshclick-style `#@group:` / `#@desc:` / `#@info:` / `#@host:` (per-host comments before `Host`)
 - Actions menu (`A`): `ssh`, `sftp`, copy `ssh <alias>` (single non-wildcard pattern)
@@ -40,6 +43,8 @@ Set `NO_COLOR=1` to disable ANSI colors in the TUI.
 ```bash
 go build -o sshui ./cmd/sshui/
 ```
+
+To install on your `PATH` (Go 1.17+): `go install github.com/sacckth/sshui/cmd/sshui@latest` (or the same path from a local clone).
 
 **Makefile:** run `make` or `make help` for targets (`build`, `test`, `dist`, `packages`, `tag-push`, …).
 
@@ -60,19 +65,41 @@ If the workflow fails the version check, fix `main.go` or delete the bad tag and
 
 ## Run
 
+Examples assume `sshui` is on your `PATH` (after `go install`, a package install, or `cp`/`mv` from `go build -o sshui`).
+
 ```bash
-./sshui
-./sshui --config /path/to/config
-./sshui list
-./sshui show myhost --json
-./sshui dump --check
+sshui
+sshui --config /path/to/config
+sshui list
+sshui show myhost --json
+sshui dump --check
 ```
 
 Press `?` in the TUI for keybindings.
 
+## Screenshots
+
+Illustrative renders (fictional hosts/users/addresses). To try the real TUI with the same synthetic file used for docs:
+
+```bash
+sshui --config "$(pwd)/docs/readme-demo.conf"
+```
+
+![Browse hosts and directive preview](docs/screenshots/browse.png)
+
+*Browse: host tree (left) and directive preview (right).*
+
+![Host detail split view](docs/screenshots/detail.png)
+
+*Detail: split view with directive list.*
+
+![Filtering the host list](docs/screenshots/filter.png)
+
+*Filter mode narrows rows by the visible Host column.*
+
 ## Help
 
 ```bash
-./sshui --help
-./sshui completion bash  # pipe to your shell rc
+sshui --help
+sshui completion bash  # pipe to your shell rc
 ```

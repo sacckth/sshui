@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	version   = "0.1.0"
+	version   = "0.1.1"
 	cfgPath   string
 	dumpJSON  bool
 	dumpCheck bool
@@ -132,11 +132,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	appToml, err := appcfg.FilePath()
+	if err != nil {
+		return err
+	}
+
 	p := tui.InitProgram(displayCfg, path, tui.Options{
-		Theme:      ac.Theme,
-		Editor:     ac.Editor,
-		ReadOnly:   readOnly,
-		MirrorPath: mirrorPath,
+		Theme:         ac.Theme,
+		Editor:        ac.Editor,
+		ReadOnly:      readOnly,
+		MirrorPath:    mirrorPath,
+		AppConfigPath: appToml,
 	})
 	final, err := p.Run()
 	if err != nil {

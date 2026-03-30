@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -20,10 +21,11 @@ import (
 
 // Options carries theme and editor preferences (from ~/.config/sshui/config.toml).
 type Options struct {
-	Theme      string
-	Editor     string
-	ReadOnly   bool   // true: merged Include browse (see help); false: single-file editable
-	MirrorPath string // optional: after save, copy bytes here (expanded abs path)
+	Theme         string
+	Editor        string
+	ReadOnly      bool   // true: merged Include browse (see help); false: single-file editable
+	MirrorPath    string // optional: after save, copy bytes here (expanded abs path)
+	AppConfigPath string // absolute path to sshui config.toml (not SSH config)
 }
 
 type viewMode int
@@ -45,6 +47,7 @@ const (
 	modeConfirmDeleteGroup
 	modeActionMenu
 	modeInputHostMeta
+	modeAppCfgView
 )
 
 type detailTab int
@@ -89,6 +92,13 @@ type Model struct {
 	treePaneFocused  bool
 	actionMenuList   list.Model
 	actionReturnMode viewMode
+
+	collapsedGroups map[string]bool
+
+	appConfigPath    string
+	themeName        string
+	appCfgReturnMode viewMode
+	appCfgViewport   viewport.Model
 }
 
 var (
@@ -136,12 +146,14 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		mirrorPath:         opts.MirrorPath,
 		detailTab:          detailTabAll,
 		treePaneFocused:    false,
+		collapsedGroups:    make(map[string]bool),
+		appConfigPath:      opts.AppConfigPath,
+		themeName:          opts.Theme,
 	}
 	lw := m.leftPaneWidth()
-	hostItems := buildHostItems(cfg, lw)
-	delegate := newCompactListDelegate()
-	l := list.New(hostItems, delegate, lw, max(6, h-4))
-	l.Title = "Hosts by group   c=new group   on header: D=delete"
+	hostItems := buildHostItems(cfg, lw, m.collapsedGroups, false)
+	l := list.New(hostItems, newHostTreeDelegate(), lw, max(6, h-4))
+	l.Title = "Hosts by group  c=new  z=fold header  D=del group"
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
@@ -176,20 +188,49 @@ type dirEntry struct {
 
 func (e dirEntry) Title() string       { return e.d.Key }
 func (e dirEntry) Description() string { return e.d.Value }
-func (e dirEntry) FilterValue() string { return e.d.Key + " " + e.d.Value }
+func (e dirEntry) FilterValue() string { return e.d.Key }
 
 type kwEntry sshkeywords.Entry
 
 func (e kwEntry) Title() string       { return e.Name }
 func (e kwEntry) Description() string { return e.Hint }
-func (e kwEntry) FilterValue() string { return e.Name + " " + e.Hint }
+func (e kwEntry) FilterValue() string { return e.Name }
 
 func hostTitle(h *scfg.HostBlock) string {
 	return hostAlias(h)
 }
 
+func (m *Model) ignoreCollapseForActiveFilter() bool {
+	if m.hostList.FilterState() == list.Unfiltered {
+		return false
+	}
+	return strings.TrimSpace(m.hostList.FilterValue()) != ""
+}
+
+type hostListFilterSnap struct {
+	state list.FilterState
+	value string
+}
+
+func (m *Model) hostListFilterSnap() hostListFilterSnap {
+	return hostListFilterSnap{state: m.hostList.FilterState(), value: m.hostList.FilterValue()}
+}
+
+func (m *Model) updateHostList(msg tea.Msg) tea.Cmd {
+	before := m.hostListFilterSnap()
+	var cmd tea.Cmd
+	m.hostList, cmd = m.hostList.Update(msg)
+	if m.hostListFilterSnap() != before {
+		m.rebuildHostList()
+	}
+	return cmd
+}
+
 func (m *Model) rebuildHostList() {
-	m.hostList.SetItems(buildHostItems(m.cfg, m.leftPaneWidth()))
+	lw := m.leftPaneWidth()
+	items := buildHostItems(m.cfg, lw, m.collapsedGroups, m.ignoreCollapseForActiveFilter())
+	m.hostList.SetItems(items)
+	m.syncTreeSelection()
 }
 
 // resyncSelectionAfterStructureChange fixes selRef and list cursor after cfg shape changes.
@@ -326,7 +367,8 @@ func (m *Model) leftPaneWidth() int {
 }
 
 func (m *Model) rightPaneWidth() int {
-	return max(24, m.width-m.leftPaneWidth()-2)
+	// One column for pane separator (│).
+	return max(24, m.width-m.leftPaneWidth()-1)
 }
 
 func (m *Model) layoutDetailPanes() {
@@ -370,6 +412,16 @@ func (m *Model) syncTreeSelection() {
 			return
 		}
 	}
+	for i, it := range items {
+		if row, ok := it.(hostRowEntry); ok {
+			m.hostList.Select(i)
+			m.selRef = row.ref
+			return
+		}
+	}
+	if len(items) > 0 {
+		m.hostList.Select(0)
+	}
 }
 
 func (m *Model) readOnlyBlocked() bool {
@@ -387,10 +439,7 @@ func (m *Model) newDetailList() list.Model {
 		rw = m.rightPaneWidth()
 		rh = max(5, m.height-5)
 	}
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
-	delegate.SetSpacing(0)
-	delegate.Styles.FilterMatch = filterMatchStyle
+	delegate := newDetailListDelegate()
 
 	var items []list.Item
 	var title string
@@ -489,10 +538,7 @@ func (m *Model) openPicker() {
 	for i := range entries {
 		items[i] = kwEntry(entries[i])
 	}
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
-	delegate.SetSpacing(0)
-	delegate.Styles.FilterMatch = filterMatchStyle
+	delegate := newDetailListDelegate()
 	l := list.New(items, delegate, m.width, m.height-3)
 	l.Title = "Add directive (type to filter)"
 	l.Styles.Title = titleStyle
@@ -663,6 +709,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionMenuList.SetWidth(min(56, msg.Width-4))
 			m.actionMenuList.SetHeight(min(8, msg.Height-4))
 		}
+		if m.mode == modeAppCfgView {
+			m.layoutAppCfgViewport()
+		}
 		return m, nil
 
 	case shellProcDoneMsg:
@@ -687,6 +736,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleRawEditorFinished(msg)
 
 	case rawEditorErrMsg:
+		m.status = errStyle.Render(msg.err.Error())
+		return m, nil
+
+	case appConfigEditorFinishedMsg:
+		return m.handleAppConfigEditorFinished(msg)
+
+	case appConfigEditorErrMsg:
 		m.status = errStyle.Render(msg.err.Error())
 		return m, nil
 
@@ -759,6 +815,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.dirty = true
 					m.status = "Group removed; hosts moved to (default)."
+					delete(m.collapsedGroups, name)
 					if gi >= 0 {
 						if !oldRef.InDefault && oldRef.GroupIdx == gi {
 							m.selRef = scfg.HostRef{InDefault: true, HostIdx: nDef + oldRef.HostIdx}
@@ -813,6 +870,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.mode == modeAppCfgView {
+			switch msg.String() {
+			case "esc", "q":
+				m.mode = m.appCfgReturnMode
+				if m.mode == modeDetail {
+					m.layoutDetailPanes()
+					m.refreshDetailList()
+				} else {
+					m.layoutDetailPanes()
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.appCfgViewport, cmd = m.appCfgViewport.Update(msg)
+			return m, cmd
+		}
 		if m.mode == modeTree {
 			return m.updateTree(msg)
 		}
@@ -824,8 +897,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	var cmd tea.Cmd
-	m.hostList, cmd = m.hostList.Update(msg)
+	if m.mode == modeAppCfgView {
+		var cmd tea.Cmd
+		m.appCfgViewport, cmd = m.appCfgViewport.Update(msg)
+		return m, cmd
+	}
+
+	cmd := m.updateHostList(msg)
 	return m, cmd
 }
 
@@ -969,8 +1047,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	if m.hostList.SettingFilter() {
-		var cmd tea.Cmd
-		m.hostList, cmd = m.hostList.Update(msg)
+		cmd := m.updateHostList(msg)
 		m.syncBrowsePreview()
 		return m, cmd
 	}
@@ -978,6 +1055,23 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("q", "Q"))):
 		return m, tea.Quit
+
+	case msg.String() == "z":
+		if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
+			m.collapsedGroups[gh.label] = !m.collapsedGroups[gh.label]
+			if !m.collapsedGroups[gh.label] {
+				delete(m.collapsedGroups, gh.label)
+			}
+			m.rebuildHostList()
+			m.syncBrowsePreview()
+			return m, nil
+		}
+
+	case msg.String() == "$":
+		return m, m.openAppConfigEditor()
+
+	case msg.String() == "&":
+		return m.openAppConfigView(modeTree)
 
 	case msg.String() == "?":
 		m.mode = modeHelp
@@ -1082,8 +1176,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	var cmd tea.Cmd
-	m.hostList, cmd = m.hostList.Update(msg)
+	cmd := m.updateHostList(msg)
 	m.syncBrowsePreview()
 	return m, cmd
 }
@@ -1101,14 +1194,27 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.treePaneFocused {
 		if m.hostList.SettingFilter() {
-			var cmd tea.Cmd
-			m.hostList, cmd = m.hostList.Update(msg)
+			cmd := m.updateHostList(msg)
 			return m, cmd
 		}
 		switch {
 		case msg.String() == "tab":
 			m.treePaneFocused = false
 			return m, nil
+		case msg.String() == "z":
+			if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
+				m.collapsedGroups[gh.label] = !m.collapsedGroups[gh.label]
+				if !m.collapsedGroups[gh.label] {
+					delete(m.collapsedGroups, gh.label)
+				}
+				m.rebuildHostList()
+				m.syncTreeSelection()
+				return m, nil
+			}
+		case msg.String() == "$":
+			return m, m.openAppConfigEditor()
+		case msg.String() == "&":
+			return m.openAppConfigView(modeDetail)
 		case msg.String() == "enter":
 			if it, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 				m.selRef = it.ref
@@ -1124,8 +1230,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rebuildHostList()
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.hostList, cmd = m.hostList.Update(msg)
+		cmd := m.updateHostList(msg)
 		return m, cmd
 	}
 
@@ -1152,6 +1257,10 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.layoutDetailPanes()
 		m.rebuildHostList()
 		return m, nil
+	case msg.String() == "$":
+		return m, m.openAppConfigEditor()
+	case msg.String() == "&":
+		return m.openAppConfigView(modeDetail)
 	case msg.String() == "s":
 		if err := m.save(); err != nil {
 			m.status = errStyle.Render("Save: " + err.Error())
@@ -1474,7 +1583,43 @@ func (m *Model) footerStatusRender() string {
 	return statusStyle.Render(s)
 }
 
+func paneSepLines(height int) string {
+	if height < 1 {
+		height = 1
+	}
+	var buf strings.Builder
+	for i := 0; i < height; i++ {
+		if i > 0 {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString("│")
+	}
+	return buf.String()
+}
+
+func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int) string {
+	lw := m.leftPaneWidth()
+	rw := m.rightPaneWidth()
+	leftBox := paneLeftStyle.Width(lw).Height(paneHeight).Render(leftBody)
+	rightBox := paneRightStyle.Width(rw).Height(paneHeight).Render(rightBody)
+	sep := paneSepStyle.Render(paneSepLines(paneHeight))
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, sep, rightBox)
+}
+
+func (m *Model) writeStatusFooter(b *strings.Builder, statusLine string) {
+	b.WriteString(footerRuleStyle.Render(strings.Repeat("─", max(1, m.width))))
+	b.WriteByte('\n')
+	b.WriteString(statusLine)
+	if m.status != "" {
+		b.WriteByte('\n')
+		b.WriteString(m.footerStatusRender())
+	}
+}
+
 func (m Model) View() string {
+	if m.mode == modeAppCfgView {
+		return m.viewAppConfigScreen()
+	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("sshui — "))
 	b.WriteString(m.path)
@@ -1546,24 +1691,23 @@ func (m Model) View() string {
 
 	case modeDetail:
 		ph := max(5, m.height-5)
-		left := lipgloss.NewStyle().Width(m.leftPaneWidth()).Height(ph).Render(m.hostList.View())
+		left := lipgloss.JoinVertical(lipgloss.Left, m.hostList.View())
 		var right string
 		if m.detailTab == detailTabOverview {
-			right = lipgloss.NewStyle().Width(m.rightPaneWidth()).Height(ph).Render(m.overviewPanel())
+			right = m.overviewPanel()
 		} else {
-			right = lipgloss.NewStyle().Width(m.rightPaneWidth()).Height(ph).Render(m.detailList.View())
+			right = m.detailList.View()
 		}
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right))
+		b.WriteString(m.joinSplitPanes(left, right, ph))
 		b.WriteByte('\n')
 		focus := "detail"
 		if m.treePaneFocused {
 			focus = "tree"
 		}
-		b.WriteString(statusStyle.Render(fmt.Sprintf("focus %s | tab switch | t tab view | W Include mode | i host meta | A actions | a add | k e d D g m o X v s | esc tree", focus)))
-		if m.status != "" {
-			b.WriteByte('\n')
-			b.WriteString(m.footerStatusRender())
-		}
+		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
+			"focus %s | tab | t tabs | W Include | i meta | A actions | a k add | e d D g m o X | v s | $ cfg | & view cfg | z fold | esc tree",
+			focus,
+		)))
 		return b.String()
 
 	case modePicker:
@@ -1586,25 +1730,21 @@ func (m Model) View() string {
 		ph := max(5, m.height-5)
 		lw := m.leftPaneWidth()
 		header := colHeaderStyle.Width(lw).Render(HostListColumnHeader(lw))
-		left := lipgloss.NewStyle().Width(lw).Height(ph).Render(lipgloss.JoinVertical(lipgloss.Left, header, m.hostList.View()))
+		left := lipgloss.JoinVertical(lipgloss.Left, header, m.hostList.View())
 		var right string
 		if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
-			right = lipgloss.NewStyle().Width(m.rightPaneWidth()).Height(ph).Render(m.detailList.View())
+			right = m.detailList.View()
 		} else {
 			right = lipgloss.NewStyle().
-				Width(m.rightPaneWidth()).
-				Height(ph).
 				Padding(1, 1).
 				Foreground(lipgloss.Color("245")).
-				Render("Select a host row to preview directives.\n\nTip: c creates a group; with a group header selected, D deletes that group.")
+				Render("Select a host row to preview directives.\n\nTip: c creates a group; header: z fold, D delete group.")
 		}
-		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right))
+		b.WriteString(m.joinSplitPanes(left, right, ph))
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter full editor | W Include mode | A actions | n host | c new group | D del grp (header) | x del host | g move | v raw | s r ? q"))
-		if m.status != "" {
-			b.WriteByte('\n')
-			b.WriteString(m.footerStatusRender())
-		}
+		m.writeStatusFooter(&b, statusStyle.Render(
+			"enter editor | W Include | A | n host | c group | z fold | D del grp | x host | g move | v raw | $ app cfg | & view cfg | / filter (Host column) | s r ? q",
+		))
 		return b.String()
 	}
 }
@@ -1616,14 +1756,17 @@ Browse (split view)
   Left: Host patterns only, grouped under (default) and #@group sections
   Right: directive preview for the selected host row
   enter     Open full editor (tabs, add/remove directives, …)
-  /         Filter host list; filter matches use highlight (not underline)
+  /         Filter host list by the visible Host column (fuzzy match + highlight)
+  z         Collapse/expand group (when a group header row is selected)
   A         Actions: ssh / sftp / copy command (host row)
   n         New host under (default)
   c         Create new empty group (also shown in the host list title)
   D         Delete group (when a group header row is selected)
   x         Delete host (confirm)
   g         Move selected host to group / (default)
-  v         Raw $EDITOR buffer
+  v         Raw $EDITOR buffer (SSH config buffer, not sshui settings)
+  $         Open sshui app config (~/.config/sshui/config.toml) in $EDITOR
+  &         View sshui app config in a read-only scrollable pane (esc/q close)
   s / r     Save / reload
   W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
   ? / q     Help / quit
@@ -1651,13 +1794,15 @@ Host detail (split: tree | detail)
   m / o     Rename group / edit #@desc
   X         Delete host (confirm)
   v / s     Raw editor / save
+  $ / &     Edit / view sshui app config (same as browse mode)
+  z         Fold group on tree (when header selected)
   esc       Back to tree
 
 CLI: sshui list | sshui show HOST [--json] | sshui dump [--json] [--check] | sshui completion bash|zsh|fish
 
 Optional: ~/.config/sshui/config.toml — ssh_config, editor, theme, ssh_config_git_mirror (copy-on-save path).
 
-NO_COLOR=1 disables ANSI styling.
+NO_COLOR=1 disables ANSI styling (pane backgrounds and list colors are subdued).
 
 Each save writes a hidden .bkp beside the config; optional mirror path gets the same bytes (0600).
 `
