@@ -39,6 +39,44 @@ Host jump
 	}
 }
 
+func TestMoveHostDefaultToGroup(t *testing.T) {
+	cfg := &Config{
+		DefaultHosts: []HostBlock{
+			{Patterns: []string{"h1"}, Directives: []Directive{{Key: "HostName", Value: "a.example.com"}}},
+		},
+		Groups: []Group{
+			{Name: "work", Hosts: []HostBlock{}},
+		},
+	}
+	ref := HostRef{InDefault: true, HostIdx: 0}
+	if err := cfg.MoveHost(ref, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DefaultHosts) != 0 || len(cfg.Groups[0].Hosts) != 1 {
+		t.Fatalf("default=%d group0=%d", len(cfg.DefaultHosts), len(cfg.Groups[0].Hosts))
+	}
+	if cfg.Groups[0].Hosts[0].Patterns[0] != "h1" {
+		t.Fatalf("host: %+v", cfg.Groups[0].Hosts[0])
+	}
+}
+
+func TestMoveHostGroupToDefault(t *testing.T) {
+	cfg := &Config{
+		Groups: []Group{
+			{Name: "work", Hosts: []HostBlock{
+				{Patterns: []string{"srv"}, Directives: nil},
+			}},
+		},
+	}
+	ref := HostRef{InDefault: false, GroupIdx: 0, HostIdx: 0}
+	if err := cfg.MoveHost(ref, true, -1); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DefaultHosts) != 1 || len(cfg.Groups[0].Hosts) != 0 {
+		t.Fatalf("default=%d group0=%d", len(cfg.DefaultHosts), len(cfg.Groups[0].Hosts))
+	}
+}
+
 func TestIncludeFlag(t *testing.T) {
 	raw := `Include config.d/*
 Host x

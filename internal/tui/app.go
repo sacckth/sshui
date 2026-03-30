@@ -28,6 +28,7 @@ const (
 	modeTree viewMode = iota
 	modeDetail
 	modePicker
+	modeGroupPicker
 	modeInputDirectiveValue
 	modeInputCustomKey
 	modeInputNewHost
@@ -45,9 +46,10 @@ type Model struct {
 	height int
 	mode   viewMode
 
-	hostList   list.Model
-	detailList list.Model
-	pickerList list.Model
+	hostList        list.Model
+	detailList      list.Model
+	pickerList      list.Model
+	groupPickerList list.Model
 
 	valueInput textinput.Model
 	keyInput   textinput.Model
@@ -57,6 +59,8 @@ type Model struct {
 	editDirectiveIndex   int // >=0 when editing value; -1 when adding
 	status               string
 	editor               string // from app config; VISUAL/EDITOR used when empty
+	confirmReturnMode    viewMode
+	returnAfterInput     viewMode
 }
 
 var (
@@ -70,9 +74,8 @@ var (
 func New(cfg *scfg.Config, path string, opts Options) *Model {
 	applyTheme(opts.Theme)
 	w, h := 80, 24
-	hostItems := buildHostItems(cfg)
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = true
+	hostItems := buildHostItems(cfg, w)
+	delegate := newCompactListDelegate()
 	l := list.New(hostItems, delegate, w, h-3)
 	l.Title = "SSH hosts"
 	l.Styles.Title = titleStyle
@@ -111,16 +114,6 @@ func InitProgram(cfg *scfg.Config, path string, opts Options) *tea.Program {
 	return tea.NewProgram(New(cfg, path, opts), tea.WithAltScreen())
 }
 
-type hostEntry struct {
-	title string
-	desc  string
-	ref   scfg.HostRef
-}
-
-func (e hostEntry) Title() string       { return e.title }
-func (e hostEntry) Description() string { return e.desc }
-func (e hostEntry) FilterValue() string { return e.title + " " + e.desc }
-
 type dirEntry struct {
 	idx int
 	d   scfg.Directive
@@ -136,40 +129,33 @@ func (e kwEntry) Title() string       { return e.Name }
 func (e kwEntry) Description() string { return e.Hint }
 func (e kwEntry) FilterValue() string { return e.Name + " " + e.Hint }
 
-func buildHostItems(cfg *scfg.Config) []list.Item {
-	var items []list.Item
-	for i := range cfg.DefaultHosts {
-		h := &cfg.DefaultHosts[i]
-		items = append(items, hostEntry{
-			title: hostTitle(h),
-			desc:  "group: (default)",
-			ref:   scfg.HostRef{InDefault: true, HostIdx: i},
-		})
-	}
-	for gi := range cfg.Groups {
-		g := &cfg.Groups[gi]
-		for hi := range g.Hosts {
-			h := &g.Hosts[hi]
-			items = append(items, hostEntry{
-				title: hostTitle(h),
-				desc:  "group: " + g.Name,
-				ref:   scfg.HostRef{InDefault: false, GroupIdx: gi, HostIdx: hi},
-			})
-		}
-	}
-	return items
-}
-
 func hostTitle(h *scfg.HostBlock) string {
-	if len(h.Patterns) == 0 {
-		return "(empty Host)"
-	}
-	return strings.Join(h.Patterns, " ")
+	return hostAlias(h)
 }
 
 func (m *Model) rebuildHostList() {
-	items := buildHostItems(m.cfg)
-	m.hostList.SetItems(items)
+	m.hostList.SetItems(buildHostItems(m.cfg, m.width))
+}
+
+func (m *Model) openGroupPicker() {
+	var items []list.Item
+	items = append(items, groupPickItem{label: "(default)", toDefault: true, groupIdx: -1})
+	for i := range m.cfg.Groups {
+		items = append(items, groupPickItem{
+			label:     m.cfg.Groups[i].Name,
+			toDefault: false,
+			groupIdx:  i,
+		})
+	}
+	d := newCompactListDelegate()
+	l := list.New(items, d, m.width, m.height-3)
+	l.Title = "Move host to group"
+	l.Styles.Title = titleStyle
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+	m.groupPickerList = l
+	m.mode = modeGroupPicker
 }
 
 func (m *Model) openDetail(ref scfg.HostRef) {
@@ -186,6 +172,7 @@ func (m *Model) newDetailList() list.Model {
 	}
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
+	delegate.SetSpacing(0)
 	l := list.New(items, delegate, m.width, m.height-3)
 	l.Title = "Directives — " + hostTitle(h)
 	l.Styles.Title = titleStyle
@@ -208,6 +195,7 @@ func (m *Model) openPicker() {
 	}
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
+	delegate.SetSpacing(0)
 	l := list.New(items, delegate, m.width, m.height-3)
 	l.Title = "Add directive (type to filter)"
 	l.Styles.Title = titleStyle
@@ -257,6 +245,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.hostList.SetWidth(msg.Width)
 		m.hostList.SetHeight(max(6, msg.Height-3))
+		if m.mode == modeTree {
+			m.rebuildHostList()
+		}
 		if m.mode == modeDetail {
 			m.detailList.SetWidth(msg.Width)
 			m.detailList.SetHeight(max(6, msg.Height-3))
@@ -264,6 +255,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modePicker {
 			m.pickerList.SetWidth(msg.Width)
 			m.pickerList.SetHeight(max(6, msg.Height-3))
+		}
+		if m.mode == modeGroupPicker {
+			m.groupPickerList.SetWidth(msg.Width)
+			m.groupPickerList.SetHeight(max(6, msg.Height-3))
 		}
 		return m, nil
 
@@ -289,18 +284,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = modeTree
 				m.status = "Host deleted."
 			case "n", "N", "esc":
-				m.mode = modeDetail
-				m.refreshDetailList()
+				m.status = ""
+				m.mode = m.confirmReturnMode
+				if m.confirmReturnMode == modeDetail {
+					m.refreshDetailList()
+				}
 			}
 			return m, nil
+
+		case modeGroupPicker:
+			return m.updateGroupPicker(msg)
 
 		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputDuplicateHost:
 			switch msg.String() {
 			case "esc":
 				m.editDirectiveIndex = -1
 				m.pendingDirectiveKey = ""
-				m.mode = modeDetail
-				m.refreshDetailList()
+				m.mode = m.returnAfterInput
+				if m.returnAfterInput == modeDetail {
+					m.refreshDetailList()
+				}
 				return m, nil
 			case "enter":
 				return m.submitInput()
@@ -444,6 +447,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "n":
+		m.returnAfterInput = modeTree
 		m.mode = modeInputNewHost
 		m.valueInput.SetValue("")
 		m.valueInput.Placeholder = "Host patterns (space-separated)"
@@ -454,10 +458,29 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.rawEditorCmd()
 
 	case msg.String() == "enter":
-		if it, ok := m.hostList.SelectedItem().(hostEntry); ok {
+		if it, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 			m.openDetail(it.ref)
 			m.detailList.SetWidth(m.width)
 			m.detailList.SetHeight(max(6, m.height-3))
+			return m, nil
+		}
+		return m, nil
+
+	case msg.String() == "x":
+		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			m.selRef = row.ref
+			m.confirmReturnMode = modeTree
+			m.mode = modeConfirmDeleteHost
+			m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
+			return m, nil
+		}
+
+	case msg.String() == "g":
+		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			m.selRef = row.ref
+			m.openGroupPicker()
+			m.groupPickerList.SetWidth(m.width)
+			m.groupPickerList.SetHeight(max(6, m.height-3))
 			return m, nil
 		}
 	}
@@ -471,6 +494,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeTree
+		m.rebuildHostList()
 		return m, nil
 
 	case msg.String() == "s":
@@ -482,12 +506,14 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "a":
+		m.returnAfterInput = modeDetail
 		m.openPicker()
 		m.pickerList.SetWidth(m.width)
 		m.pickerList.SetHeight(max(6, m.height-3))
 		return m, nil
 
 	case msg.String() == "k":
+		m.returnAfterInput = modeDetail
 		m.editDirectiveIndex = -1
 		m.mode = modeInputCustomKey
 		m.keyInput.SetValue("")
@@ -496,6 +522,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "e":
 		if it, ok := m.detailList.SelectedItem().(dirEntry); ok {
+			m.returnAfterInput = modeDetail
 			h := m.cfg.HostAt(m.selRef)
 			m.valueInput.SetValue(h.Directives[it.idx].Value)
 			m.valueInput.Placeholder = "value"
@@ -517,6 +544,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "D":
+		m.returnAfterInput = modeDetail
 		m.mode = modeInputDuplicateHost
 		m.valueInput.SetValue(hostTitle(m.cfg.HostAt(m.selRef)) + "-copy")
 		m.valueInput.Placeholder = "new Host patterns"
@@ -524,6 +552,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 
 	case msg.String() == "X":
+		m.confirmReturnMode = modeDetail
 		m.mode = modeConfirmDeleteHost
 		m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
 		return m, nil
@@ -545,6 +574,7 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "enter":
 		if it, ok := m.pickerList.SelectedItem().(kwEntry); ok {
+			m.returnAfterInput = modeDetail
 			m.editDirectiveIndex = -1
 			m.pendingDirectiveKey = it.Name
 			m.mode = modeInputDirectiveValue
@@ -561,6 +591,29 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.pickerList, cmd = m.pickerList.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		m.mode = modeTree
+		return m, nil
+	case msg.String() == "enter":
+		if it, ok := m.groupPickerList.SelectedItem().(groupPickItem); ok {
+			if err := m.cfg.MoveHost(m.selRef, it.toDefault, it.groupIdx); err != nil {
+				m.status = errStyle.Render(err.Error())
+			} else {
+				m.dirty = true
+				m.rebuildHostList()
+				m.status = fmt.Sprintf("Moved host to %q.", it.label)
+			}
+			m.mode = modeTree
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.groupPickerList, cmd = m.groupPickerList.Update(msg)
 	return m, cmd
 }
 
@@ -623,10 +676,16 @@ func (m Model) View() string {
 		b.WriteString(statusStyle.Render("enter pick | esc cancel"))
 		return b.String()
 
+	case modeGroupPicker:
+		b.WriteString(m.groupPickerList.View())
+		b.WriteByte('\n')
+		b.WriteString(statusStyle.Render("enter: move host here | esc: cancel"))
+		return b.String()
+
 	default: // tree
 		b.WriteString(m.hostList.View())
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter: open | n new host | v raw $EDITOR | s save | r reload | ? help | q quit"))
+		b.WriteString(statusStyle.Render("enter open | n new | x del host | g move group | v raw $EDITOR | s save | r reload | ? | q quit"))
 		if m.status != "" {
 			b.WriteByte('\n')
 			b.WriteString(statusStyle.Render(m.status))
@@ -639,9 +698,11 @@ const helpText = `
 sshui — SSH client config TUI
 
 Tree
-  enter     Open host directives
-  /         Filter hosts
+  enter     Open host directives (group headers are section labels only)
+  /         Filter hosts (searches alias, HostName, User, group name)
   n         New host (default section)
+  x         Delete host (confirm) — same as X in detail
+  g         Move host to another group / (default)
   v         Edit serialized config in $EDITOR / VISUAL / EDITOR (see ~/.config/sshui/config.toml)
   s         Save to file
   r         Reload from disk (discards unsaved edits)
@@ -654,7 +715,7 @@ Host detail
   e         Edit selected directive value
   d         Delete selected directive
   D         Duplicate host (new Host patterns)
-  X         Delete entire host (confirm)
+  X         Delete entire host (confirm); returns to tree after delete
   v         Raw editor on in-memory buffer (same as tree)
   s         Save
   esc       Back to tree
