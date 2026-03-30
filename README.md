@@ -31,7 +31,7 @@ Set `NO_COLOR=1` to disable ANSI colors in the TUI.
 - Split host detail: tree + Overview / all directives / Connectivity tabs; `tab` switches pane focus
 - sshclick-style `#@group:` / `#@desc:` / `#@info:` / `#@host:` (per-host comments before `Host`)
 - Actions menu (`A`): `ssh`, `sftp`, copy `ssh <alias>` (single non-wildcard pattern)
-- `Include`: read-only merged browse of included files as `include:<filename>` groups
+- **`Include`:** If the opened file contains `Include`, sshui starts in **read-only merged** mode: it loads that file plus every matched include and shows extra `include:<filename>` groups so you can browse everything in one tree. **Saving is disabled** (one save could not update every file). Press **`W`** in the TUI to switch to a **writable** view of **only** the main file (included hosts are hidden); **`s`** still writes that path only. Press **`W`** again (no unsaved changes) or **`r`** (reload) to return to merged read-only browse if `Include` is still there. See **`?`** in the TUI for the full note.
 - Optional git/dotfiles mirror on save (`ssh_config_git_mirror`)
 - CLI: `list`, `show`, `dump` (`--json`, `--check`), `completion bash|zsh|fish`
 

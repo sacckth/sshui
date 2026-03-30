@@ -18,7 +18,7 @@ func (e groupHeaderEntry) Title() string       { return "▸ " + e.label }
 func (e groupHeaderEntry) Description() string { return "" }
 func (e groupHeaderEntry) FilterValue() string { return e.label }
 
-// hostRowEntry is one host row with Host patterns, HostName, and User columns.
+// hostRowEntry is one host row showing Host patterns only (left pane).
 type hostRowEntry struct {
 	title  string
 	ref    scfg.HostRef
@@ -58,58 +58,43 @@ func hostAlias(h *scfg.HostBlock) string {
 	return strings.Join(h.Patterns, " ")
 }
 
-// columnWidths returns inner width (after indent) and three column visual widths.
-func columnWidths(totalWidth int) (inner, lw, hw, uw int) {
-	const indent = "  "
-	inner = totalWidth - runewidth.StringWidth(indent)
-	if inner < 28 {
-		inner = 28
+// HostConnectivityTitle is the preferred heading for a host (User @ HostName), falling
+// back to Host patterns when those directives are missing.
+func HostConnectivityTitle(h *scfg.HostBlock) string {
+	hn := directiveValue(h, "HostName", "hostname")
+	user := directiveValue(h, "User", "user")
+	switch {
+	case hn != "" && user != "":
+		return user + " @ " + hn
+	case hn != "":
+		return hn
+	case user != "":
+		return user
+	default:
+		return hostAlias(h)
 	}
-	lw = inner * 30 / 100
-	if lw < 10 {
-		lw = 10
-	}
-	hw = inner * 44 / 100
-	if hw < 14 {
-		hw = 14
-	}
-	uw = inner - lw - hw - 2
-	if uw < 8 {
-		uw = 8
-		hw = inner - lw - uw - 2
-		if hw < 10 {
-			hw = 10
-		}
-	}
-	return inner, lw, hw, uw
 }
 
-// HostListColumnHeader aligns with formatHostLine columns (Host / HostName / User).
+const hostListIndent = "  "
+
+func hostListInnerWidth(totalWidth int) int {
+	inner := totalWidth - runewidth.StringWidth(hostListIndent)
+	if inner < 4 {
+		inner = 4
+	}
+	return inner
+}
+
+// HostListColumnHeader aligns with formatHostListLine (single Host column).
 func HostListColumnHeader(totalWidth int) string {
-	const indent = "  "
-	_, lw, hw, uw := columnWidths(totalWidth)
-	h1 := runewidth.Truncate("Host", lw, "…")
-	h2 := runewidth.Truncate("HostName", hw, "…")
-	h3 := runewidth.Truncate("User", uw, "…")
-	return indent + padRightVisual(h1, lw) + " " + padRightVisual(h2, hw) + " " + padRightVisual(h3, uw)
+	inner := hostListInnerWidth(totalWidth)
+	h := runewidth.Truncate("Host", inner, "…")
+	return hostListIndent + h
 }
 
-func formatHostLine(alias, hostname, user string, totalWidth int) string {
-	const indent = "  "
-	_, lw, hw, uw := columnWidths(totalWidth)
-
-	a := runewidth.Truncate(alias, lw, "…")
-	hn := runewidth.Truncate(hostname, hw, "…")
-	u := runewidth.Truncate(user, uw, "…")
-	return indent + padRightVisual(a, lw) + " " + padRightVisual(hn, hw) + " " + padRightVisual(u, uw)
-}
-
-func padRightVisual(s string, w int) string {
-	sw := runewidth.StringWidth(s)
-	if sw >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-sw)
+func formatHostListLine(alias string, totalWidth int) string {
+	inner := hostListInnerWidth(totalWidth)
+	return hostListIndent + runewidth.Truncate(alias, inner, "…")
 }
 
 func groupDescEditPreview(lines []string) string {
@@ -123,8 +108,8 @@ func groupDescEditPreview(lines []string) string {
 }
 
 func buildHostItems(cfg *scfg.Config, totalWidth int) []list.Item {
-	if totalWidth < 48 {
-		totalWidth = 80
+	if totalWidth < 12 {
+		totalWidth = 48
 	}
 	var items []list.Item
 
@@ -133,14 +118,8 @@ func buildHostItems(cfg *scfg.Config, totalWidth int) []list.Item {
 		h := &cfg.DefaultHosts[i]
 		hn := directiveValue(h, "HostName", "hostname")
 		user := directiveValue(h, "User", "user")
-		if hn == "" {
-			hn = "—"
-		}
-		if user == "" {
-			user = "—"
-		}
 		al := hostAlias(h)
-		line := formatHostLine(al, hn, user, totalWidth)
+		line := formatHostListLine(al, totalWidth)
 		filter := strings.ToLower(al + " " + hn + " " + user + " default")
 		items = append(items, hostRowEntry{
 			title:  line,
@@ -156,14 +135,8 @@ func buildHostItems(cfg *scfg.Config, totalWidth int) []list.Item {
 			h := &g.Hosts[hi]
 			hn := directiveValue(h, "HostName", "hostname")
 			user := directiveValue(h, "User", "user")
-			if hn == "" {
-				hn = "—"
-			}
-			if user == "" {
-				user = "—"
-			}
 			al := hostAlias(h)
-			line := formatHostLine(al, hn, user, totalWidth)
+			line := formatHostListLine(al, totalWidth)
 			filter := strings.ToLower(al + " " + hn + " " + user + " " + g.Name)
 			items = append(items, hostRowEntry{
 				title:  line,
@@ -179,6 +152,7 @@ func newCompactListDelegate() list.DefaultDelegate {
 	d := list.NewDefaultDelegate()
 	d.ShowDescription = false
 	d.SetSpacing(0)
+	d.Styles.FilterMatch = filterMatchStyle
 	d.Styles.NormalTitle = d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0)
 	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Copy().Padding(0, 0, 0, 0)
 	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0)

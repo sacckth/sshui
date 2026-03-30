@@ -22,7 +22,7 @@ import (
 type Options struct {
 	Theme      string
 	Editor     string
-	ReadOnly   bool   // merged Include view: no save or mutating edits
+	ReadOnly   bool   // true: merged Include browse (see help); false: single-file editable
 	MirrorPath string // optional: after save, copy bytes here (expanded abs path)
 }
 
@@ -113,14 +113,6 @@ func (e actionItem) FilterValue() string { return e.id }
 func New(cfg *scfg.Config, path string, opts Options) *Model {
 	applyTheme(opts.Theme)
 	w, h := 80, 24
-	hostItems := buildHostItems(cfg, w)
-	delegate := newCompactListDelegate()
-	l := list.New(hostItems, delegate, w, max(6, h-4))
-	l.Title = "SSH hosts"
-	l.Styles.Title = titleStyle
-	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(true)
-	l.DisableQuitKeybindings()
 
 	ti := textinput.New()
 	ti.CharLimit = 8192
@@ -131,12 +123,11 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	ki.Width = 40
 	ki.Placeholder = "DirectiveKey (custom / future keywords)"
 
-	return &Model{
+	m := &Model{
 		cfg:                cfg,
 		path:               path,
 		width:              w,
 		height:             h,
-		hostList:           l,
 		valueInput:         ti,
 		keyInput:           ki,
 		editDirectiveIndex: -1,
@@ -146,6 +137,27 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		detailTab:          detailTabAll,
 		treePaneFocused:    false,
 	}
+	lw := m.leftPaneWidth()
+	hostItems := buildHostItems(cfg, lw)
+	delegate := newCompactListDelegate()
+	l := list.New(hostItems, delegate, lw, max(6, h-4))
+	l.Title = "Hosts by group   c=new group   on header: D=delete"
+	l.Styles.Title = titleStyle
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(true)
+	l.DisableQuitKeybindings()
+	m.hostList = l
+	for i, it := range m.hostList.Items() {
+		if row, ok := it.(hostRowEntry); ok {
+			m.selRef = row.ref
+			m.hostList.Select(i)
+			break
+		}
+	}
+	// detailList must exist before layoutDetailPanes — a zero list.Model panics on SetSize.
+	m.detailList = m.newDetailList()
+	m.layoutDetailPanes()
+	return m
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -177,7 +189,93 @@ func hostTitle(h *scfg.HostBlock) string {
 }
 
 func (m *Model) rebuildHostList() {
-	m.hostList.SetItems(buildHostItems(m.cfg, m.width))
+	m.hostList.SetItems(buildHostItems(m.cfg, m.leftPaneWidth()))
+}
+
+// resyncSelectionAfterStructureChange fixes selRef and list cursor after cfg shape changes.
+func (m *Model) resyncSelectionAfterStructureChange() {
+	if m.cfg.ValidateRef(m.selRef) == nil {
+		m.syncTreeSelection()
+		m.refreshDetailList()
+		return
+	}
+	for i, it := range m.hostList.Items() {
+		if row, ok := it.(hostRowEntry); ok {
+			m.selRef = row.ref
+			m.hostList.Select(i)
+			break
+		}
+	}
+	m.refreshDetailList()
+}
+
+// toggleIncludeEditMode switches between merged read-only browse (all Include files) and
+// editable single-file view (main path only). No-op if the file has no Include.
+func (m *Model) toggleIncludeEditMode() {
+	if !m.cfg.HasInclude {
+		m.status = statusStyle.Render("No Include in this file.")
+		return
+	}
+	if m.readOnly {
+		data, err := os.ReadFile(m.path)
+		if err != nil && !os.IsNotExist(err) {
+			m.status = errStyle.Render("Read: " + err.Error())
+			return
+		}
+		var cfg *scfg.Config
+		if len(data) == 0 {
+			cfg = &scfg.Config{}
+		} else {
+			cfg, err = scfg.Parse(strings.NewReader(string(data)))
+			if err != nil {
+				m.status = errStyle.Render("Parse: " + err.Error())
+				return
+			}
+		}
+		m.cfg = cfg
+		m.readOnly = false
+		m.dirty = false
+		m.rebuildHostList()
+		m.layoutDetailPanes()
+		m.resyncSelectionAfterStructureChange()
+		m.status = fmt.Sprintf("Writable: only %s (included hosts hidden). Save writes this file. Press W or r for merged read-only browse.", m.path)
+		return
+	}
+	if m.dirty {
+		m.status = errStyle.Render("Save (s) or reload (r) before switching back to merged Include view.")
+		return
+	}
+	data, err := os.ReadFile(m.path)
+	if err != nil && !os.IsNotExist(err) {
+		m.status = errStyle.Render("Read: " + err.Error())
+		return
+	}
+	var cfg *scfg.Config
+	if len(data) == 0 {
+		cfg = &scfg.Config{}
+	} else {
+		cfg, err = scfg.Parse(strings.NewReader(string(data)))
+		if err != nil {
+			m.status = errStyle.Render("Parse: " + err.Error())
+			return
+		}
+	}
+	if !cfg.HasInclude {
+		m.status = errStyle.Render("Include was removed on disk; staying in single-file view.")
+		m.cfg = cfg
+		m.readOnly = false
+		m.rebuildHostList()
+		m.layoutDetailPanes()
+		m.resyncSelectionAfterStructureChange()
+		return
+	}
+	m.cfg = scfg.MergeIncludes(m.path, cfg)
+	m.readOnly = true
+	m.dirty = false
+	m.rebuildHostList()
+	m.layoutDetailPanes()
+	m.resyncSelectionAfterStructureChange()
+	m.status = "Merged read-only browse (all Include files). W = edit main file only."
 }
 
 func (m *Model) openGroupPicker(returnTo viewMode) {
@@ -234,16 +332,31 @@ func (m *Model) rightPaneWidth() int {
 func (m *Model) layoutDetailPanes() {
 	ph := max(5, m.height-5)
 	m.hostList.SetWidth(m.leftPaneWidth())
-	m.hostList.SetHeight(ph)
+	// Browse (tree) draws a 1-line column header above the list inside the left pane.
+	if m.mode == modeTree {
+		m.hostList.SetHeight(max(4, ph-1))
+	} else {
+		m.hostList.SetHeight(ph)
+	}
 	m.detailList.SetWidth(m.rightPaneWidth())
 	m.detailList.SetHeight(ph)
 }
 
-// layoutTreeList restores host list dimensions after split-pane detail view (narrow
-// tree) so the Host / HostName / User columns render at full terminal width.
-func (m *Model) layoutTreeList() {
-	m.hostList.SetWidth(m.width)
-	m.hostList.SetHeight(max(6, m.height-4))
+// syncBrowsePreview updates selRef and the directive preview when the cursor is on a
+// host row in tree (browse) mode.
+func (m *Model) syncBrowsePreview() {
+	if m.mode != modeTree {
+		return
+	}
+	row, ok := m.hostList.SelectedItem().(hostRowEntry)
+	if !ok {
+		return
+	}
+	if m.selRef == row.ref {
+		return
+	}
+	m.selRef = row.ref
+	m.refreshDetailList()
 }
 
 func (m *Model) syncTreeSelection() {
@@ -263,46 +376,55 @@ func (m *Model) readOnlyBlocked() bool {
 	if !m.readOnly {
 		return false
 	}
-	m.status = errStyle.Render("Read-only: Include present (merged view).")
+	m.status = "Read-only: merged Include view — Press W to edit the main file only, or ? for help."
 	return true
 }
 
 func (m *Model) newDetailList() list.Model {
-	h := m.cfg.HostAt(m.selRef)
-	var items []list.Item
-	switch m.detailTab {
-	case detailTabConnectivity:
-		for i := range h.Directives {
-			d := h.Directives[i]
-			if IsConnectivityKey(d.Key) {
-				items = append(items, dirEntry{idx: i, d: d})
-			}
-		}
-	case detailTabOverview:
-		items = nil
-	default: // detailTabAll
-		for i := range h.Directives {
-			items = append(items, dirEntry{idx: i, d: h.Directives[i]})
-		}
+	rw := m.width
+	rh := m.height - 3
+	if m.mode == modeDetail || m.mode == modeTree {
+		rw = m.rightPaneWidth()
+		rh = max(5, m.height-5)
 	}
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
 	delegate.SetSpacing(0)
-	rw := m.width
-	rh := m.height - 3
-	if m.mode == modeDetail {
-		rw = m.rightPaneWidth()
-		rh = max(5, m.height-5)
+	delegate.Styles.FilterMatch = filterMatchStyle
+
+	var items []list.Item
+	var title string
+	if err := m.cfg.ValidateRef(m.selRef); err != nil {
+		title = detailTabTitle(m.detailTab) + " — (select a host)"
+	} else {
+		h := m.cfg.HostAt(m.selRef)
+		switch m.detailTab {
+		case detailTabConnectivity:
+			for i := range h.Directives {
+				d := h.Directives[i]
+				if IsConnectivityKey(d.Key) {
+					items = append(items, dirEntry{idx: i, d: d})
+				}
+			}
+		case detailTabOverview:
+			items = nil
+		default: // detailTabAll
+			for i := range h.Directives {
+				items = append(items, dirEntry{idx: i, d: h.Directives[i]})
+			}
+		}
+		sub := HostConnectivityTitle(h)
+		title = detailTabTitle(m.detailTab) + " — " + sub
+		if !m.selRef.InDefault && m.selRef.GroupIdx >= 0 && m.selRef.GroupIdx < len(m.cfg.Groups) {
+			title += " — " + m.cfg.Groups[m.selRef.GroupIdx].Name
+		}
 	}
 	l := list.New(items, delegate, rw, rh)
-	title := detailTabTitle(m.detailTab) + " — " + hostTitle(h)
-	if !m.selRef.InDefault && m.selRef.GroupIdx >= 0 && m.selRef.GroupIdx < len(m.cfg.Groups) {
-		title += " — " + m.cfg.Groups[m.selRef.GroupIdx].Name
-	}
 	l.Title = title
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity)
+	filterOK := m.cfg.ValidateRef(m.selRef) == nil
+	l.SetFilteringEnabled(filterOK && (m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity))
 	l.DisableQuitKeybindings()
 	return l
 }
@@ -319,6 +441,13 @@ func detailTabTitle(t detailTab) string {
 }
 
 func (m *Model) overviewPanel() string {
+	if m.cfg.ValidateRef(m.selRef) != nil {
+		return lipgloss.NewStyle().
+			Border(panelBorder).
+			Padding(0, 1).
+			Width(m.rightPaneWidth() - 2).
+			Render(statusStyle.Render("No host selected."))
+	}
 	h := m.cfg.HostAt(m.selRef)
 	var b strings.Builder
 	if len(h.HostComments) > 0 {
@@ -363,6 +492,7 @@ func (m *Model) openPicker() {
 	delegate := list.NewDefaultDelegate()
 	delegate.ShowDescription = true
 	delegate.SetSpacing(0)
+	delegate.Styles.FilterMatch = filterMatchStyle
 	l := list.New(items, delegate, m.width, m.height-3)
 	l.Title = "Add directive (type to filter)"
 	l.Styles.Title = titleStyle
@@ -383,7 +513,7 @@ func hiddenBackupPath(configPath string) string {
 
 func (m *Model) save() error {
 	if m.readOnly {
-		return fmt.Errorf("read-only: config uses Include")
+		return fmt.Errorf("read-only merged Include view (press W to edit main file only)")
 	}
 	out, err := scfg.String(m.cfg)
 	if err != nil {
@@ -502,7 +632,8 @@ func (m *Model) reloadFromDisk() {
 	}
 	m.dirty = false
 	m.rebuildHostList()
-	m.layoutTreeList()
+	m.layoutDetailPanes()
+	m.syncBrowsePreview()
 	m.status = "Reloaded from disk."
 }
 
@@ -511,14 +642,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.hostList.SetWidth(msg.Width)
-		m.hostList.SetHeight(max(6, msg.Height-4))
-		if m.mode == modeTree {
-			m.rebuildHostList()
-		}
-		if m.mode == modeDetail {
+		switch m.mode {
+		case modeTree, modeDetail:
 			m.layoutDetailPanes()
+			m.rebuildHostList()
 			m.detailList = m.newDetailList()
+		default:
+			m.hostList.SetWidth(msg.Width)
+			m.hostList.SetHeight(max(6, msg.Height-4))
 		}
 		if m.mode == modePicker {
 			m.pickerList.SetWidth(msg.Width)
@@ -541,7 +672,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.layoutDetailPanes()
 				m.refreshDetailList()
 			} else if m.mode == modeTree {
-				m.layoutTreeList()
+				m.layoutDetailPanes()
+				m.refreshDetailList()
 			}
 		}
 		if msg.err != nil {
@@ -562,7 +694,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeHelp:
 			m.mode = modeTree
-			m.layoutTreeList()
+			m.layoutDetailPanes()
+			m.refreshDetailList()
 			return m, nil
 
 		case modeConfirmDeleteHost:
@@ -575,20 +708,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.layoutDetailPanes()
 						m.refreshDetailList()
 					} else if m.confirmReturnMode == modeTree {
-						m.layoutTreeList()
+						m.layoutDetailPanes()
+						m.refreshDetailList()
 					}
 					return m, nil
 				}
 				m.cfg.DeleteHost(m.selRef)
 				m.dirty = true
 				m.mode = modeTree
-				m.layoutTreeList()
+				m.layoutDetailPanes()
 				m.rebuildHostList()
+				m.syncBrowsePreview()
+				m.refreshDetailList()
 				m.status = "Host deleted."
 			case "n", "N", "esc":
 				m.status = ""
 				m.mode = m.confirmReturnMode
 				if m.confirmReturnMode == modeDetail {
+					m.layoutDetailPanes()
+					m.refreshDetailList()
+				} else if m.confirmReturnMode == modeTree {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
 				}
@@ -602,24 +741,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = errStyle.Render("Read-only.")
 					m.pendingDeleteGroupName = ""
 					m.mode = modeTree
-					m.layoutTreeList()
+					m.layoutDetailPanes()
 					return m, nil
 				}
-				if err := m.cfg.DeleteGroupByName(m.pendingDeleteGroupName); err != nil {
+				gi := -1
+				for i := range m.cfg.Groups {
+					if m.cfg.Groups[i].Name == m.pendingDeleteGroupName {
+						gi = i
+						break
+					}
+				}
+				nDef := len(m.cfg.DefaultHosts)
+				oldRef := m.selRef
+				name := m.pendingDeleteGroupName
+				if err := m.cfg.DeleteGroupByName(name); err != nil {
 					m.status = errStyle.Render(err.Error())
 				} else {
 					m.dirty = true
 					m.status = "Group removed; hosts moved to (default)."
+					if gi >= 0 {
+						if !oldRef.InDefault && oldRef.GroupIdx == gi {
+							m.selRef = scfg.HostRef{InDefault: true, HostIdx: nDef + oldRef.HostIdx}
+						} else if !oldRef.InDefault && oldRef.GroupIdx > gi {
+							m.selRef.GroupIdx--
+						}
+					}
 				}
 				m.pendingDeleteGroupName = ""
 				m.mode = modeTree
-				m.layoutTreeList()
+				m.layoutDetailPanes()
 				m.rebuildHostList()
+				m.syncTreeSelection()
+				m.refreshDetailList()
 			case "n", "N", "esc":
 				m.status = ""
 				m.pendingDeleteGroupName = ""
 				m.mode = modeTree
-				m.layoutTreeList()
+				m.layoutDetailPanes()
 			}
 			return m, nil
 
@@ -747,8 +905,9 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		}
 		m.dirty = true
 		m.mode = modeTree
-		m.layoutTreeList()
+		m.layoutDetailPanes()
 		m.rebuildHostList()
+		m.refreshDetailList()
 		m.status = fmt.Sprintf("Created group %q.", name)
 
 	case modeInputRenameGroup:
@@ -812,6 +971,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.hostList.SettingFilter() {
 		var cmd tea.Cmd
 		m.hostList, cmd = m.hostList.Update(msg)
+		m.syncBrowsePreview()
 		return m, cmd
 	}
 
@@ -833,6 +993,10 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "r":
 		m.reloadFromDisk()
+		return m, nil
+
+	case msg.String() == "W":
+		m.toggleIncludeEditMode()
 		return m, nil
 
 	case msg.String() == "A":
@@ -920,12 +1084,19 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.hostList, cmd = m.hostList.Update(msg)
+	m.syncBrowsePreview()
 	return m, cmd
 }
 
 func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
 		return m, tea.Quit
+	}
+	if msg.String() == "W" {
+		m.toggleIncludeEditMode()
+		m.layoutDetailPanes()
+		m.refreshDetailList()
+		return m, nil
 	}
 
 	if m.treePaneFocused {
@@ -949,7 +1120,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.mode = modeTree
-			m.layoutTreeList()
+			m.layoutDetailPanes()
 			m.rebuildHostList()
 			return m, nil
 		}
@@ -978,7 +1149,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeTree
-		m.layoutTreeList()
+		m.layoutDetailPanes()
 		m.rebuildHostList()
 		return m, nil
 	case msg.String() == "s":
@@ -1137,7 +1308,7 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.layoutDetailPanes()
 			m.refreshDetailList()
 		} else if m.mode == modeTree {
-			m.layoutTreeList()
+			m.layoutDetailPanes()
 		}
 		return m, nil
 	}
@@ -1150,7 +1321,7 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
 				} else if m.mode == modeTree {
-					m.layoutTreeList()
+					m.layoutDetailPanes()
 				}
 				return m, nil
 			case "ssh":
@@ -1174,7 +1345,7 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
 				} else if m.mode == modeTree {
-					m.layoutTreeList()
+					m.layoutDetailPanes()
 				}
 				return m, nil
 			}
@@ -1229,7 +1400,11 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = m.groupPickerReturnMode
 		m.status = ""
+		m.layoutDetailPanes()
 		if m.groupPickerReturnMode == modeDetail && m.cfg.ValidateRef(m.selRef) == nil {
+			m.refreshDetailList()
+		}
+		if m.groupPickerReturnMode == modeTree {
 			m.refreshDetailList()
 		}
 		return m, nil
@@ -1238,8 +1413,11 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.readOnly {
 				m.status = errStyle.Render("Read-only.")
 				m.mode = m.groupPickerReturnMode
+				m.layoutDetailPanes()
 				if m.groupPickerReturnMode == modeDetail {
-					m.layoutDetailPanes()
+					m.refreshDetailList()
+				}
+				if m.groupPickerReturnMode == modeTree {
 					m.refreshDetailList()
 				}
 				return m, nil
@@ -1249,10 +1427,23 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.dirty = true
 				m.status = fmt.Sprintf("Moved host to %q.", it.label)
+				if it.toDefault {
+					m.selRef = scfg.HostRef{InDefault: true, HostIdx: len(m.cfg.DefaultHosts) - 1}
+				} else {
+					g := it.groupIdx
+					m.selRef = scfg.HostRef{InDefault: false, GroupIdx: g, HostIdx: len(m.cfg.Groups[g].Hosts) - 1}
+				}
 			}
-			m.mode = modeTree
-			m.layoutTreeList()
+			m.mode = m.groupPickerReturnMode
+			m.layoutDetailPanes()
 			m.rebuildHostList()
+			m.syncTreeSelection()
+			if m.mode == modeDetail {
+				m.refreshDetailList()
+			} else {
+				m.syncBrowsePreview()
+				m.refreshDetailList()
+			}
 			return m, nil
 		}
 	}
@@ -1261,23 +1452,50 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// footerStatusRender applies list-footer styling: green for read-only Include hints, yellow
+// warning for writable Include hints, passes through already-styled (ANSI) strings, else dim status.
+func (m *Model) footerStatusRender() string {
+	if m.status == "" {
+		return ""
+	}
+	s := m.status
+	if len(s) > 0 && s[0] == '\x1b' {
+		return s
+	}
+	if m.readOnly && m.cfg.HasInclude {
+		if strings.HasPrefix(s, "Read-only: merged Include view") ||
+			strings.HasPrefix(s, "Merged read-only browse") {
+			return readOnlyBannerStyle.Render(s)
+		}
+	}
+	if !m.readOnly && m.cfg.HasInclude && strings.HasPrefix(s, "Writable:") {
+		return writableWarnStyle.Render(s)
+	}
+	return statusStyle.Render(s)
+}
+
 func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("sshui — "))
 	b.WriteString(m.path)
 	if m.readOnly {
-		b.WriteString(errStyle.Render(" [read-only]"))
+		b.WriteString(readOnlyBannerStyle.Render(" [read-only merged Include]"))
 	}
 	if m.dirty {
 		b.WriteString(errStyle.Render(" *"))
 	}
 	b.WriteByte('\n')
 	if m.cfg.HasInclude && !m.readOnly {
-		b.WriteString(errStyle.Render("Warning: file contains Include; only this file is edited. "))
+		b.WriteString(writableWarnStyle.Render(
+			"Include: editing main file only (hosts from included files are hidden). Save writes this path. Press W or r for merged read-only browse.",
+		))
 		b.WriteByte('\n')
 	}
 	if m.cfg.HasInclude && m.readOnly {
-		b.WriteString(statusStyle.Render("Include: merged view (browse only). "))
+		b.WriteString(readOnlyBannerStyle.Render(fmt.Sprintf(
+			"Include: merged read-only — main file plus all Include targets are shown in one tree; save is disabled (cannot write multiple files). Press W to edit only %s. r reloads from disk.",
+			m.path,
+		)))
 		b.WriteByte('\n')
 	}
 	switch m.mode {
@@ -1315,7 +1533,7 @@ func (m Model) View() string {
 		b.WriteString(m.valueInput.View())
 		b.WriteByte('\n')
 		if m.status != "" {
-			b.WriteString(statusStyle.Render(m.status))
+			b.WriteString(m.footerStatusRender())
 		}
 		return b.String()
 
@@ -1341,10 +1559,10 @@ func (m Model) View() string {
 		if m.treePaneFocused {
 			focus = "tree"
 		}
-		b.WriteString(statusStyle.Render(fmt.Sprintf("focus %s | tab switch | t tab view | i host meta | A actions | a add | k e d D g m o X v s | esc tree", focus)))
+		b.WriteString(statusStyle.Render(fmt.Sprintf("focus %s | tab switch | t tab view | W Include mode | i host meta | A actions | a add | k e d D g m o X v s | esc tree", focus)))
 		if m.status != "" {
 			b.WriteByte('\n')
-			b.WriteString(statusStyle.Render(m.status))
+			b.WriteString(m.footerStatusRender())
 		}
 		return b.String()
 
@@ -1364,15 +1582,28 @@ func (m Model) View() string {
 		b.WriteString(statusStyle.Render("enter: move host here | esc: back to " + escHint))
 		return b.String()
 
-	default: // tree
-		b.WriteString(colHeaderStyle.Render(HostListColumnHeader(m.width)))
+	default: // tree (browse): hosts by group | directive preview
+		ph := max(5, m.height-5)
+		lw := m.leftPaneWidth()
+		header := colHeaderStyle.Width(lw).Render(HostListColumnHeader(lw))
+		left := lipgloss.NewStyle().Width(lw).Height(ph).Render(lipgloss.JoinVertical(lipgloss.Left, header, m.hostList.View()))
+		var right string
+		if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
+			right = lipgloss.NewStyle().Width(m.rightPaneWidth()).Height(ph).Render(m.detailList.View())
+		} else {
+			right = lipgloss.NewStyle().
+				Width(m.rightPaneWidth()).
+				Height(ph).
+				Padding(1, 1).
+				Foreground(lipgloss.Color("245")).
+				Render("Select a host row to preview directives.\n\nTip: c creates a group; with a group header selected, D deletes that group.")
+		}
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right))
 		b.WriteByte('\n')
-		b.WriteString(m.hostList.View())
-		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter open | A actions | n host | c group | D del grp | x del host | g move | v raw | s r ? q"))
+		b.WriteString(statusStyle.Render("enter full editor | W Include mode | A actions | n host | c new group | D del grp (header) | x del host | g move | v raw | s r ? q"))
 		if m.status != "" {
 			b.WriteByte('\n')
-			b.WriteString(statusStyle.Render(m.status))
+			b.WriteString(m.footerStatusRender())
 		}
 		return b.String()
 	}
@@ -1381,19 +1612,32 @@ func (m Model) View() string {
 const helpText = `
 sshui — SSH client config TUI
 
-Tree
-  enter     Open host (group rows are section headers only)
-  Column header row shows: Host (patterns) | HostName | User
-  /         Filter; while filter is open, letter keys go to filter
+Browse (split view)
+  Left: Host patterns only, grouped under (default) and #@group sections
+  Right: directive preview for the selected host row
+  enter     Open full editor (tabs, add/remove directives, …)
+  /         Filter host list; filter matches use highlight (not underline)
   A         Actions: ssh / sftp / copy command (host row)
   n         New host under (default)
-  c         Create new empty group
-  D         Delete group (when a group header is selected)
+  c         Create new empty group (also shown in the host list title)
+  D         Delete group (when a group header row is selected)
   x         Delete host (confirm)
   g         Move selected host to group / (default)
   v         Raw $EDITOR buffer
   s / r     Save / reload
+  W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
   ? / q     Help / quit
+
+Include / read-only (merged view)
+  If your config contains an Include directive, sshui may start in read-only merged mode: it loads
+  the main file you opened plus every file matched by Include and shows extra groups like
+  include:filename so you can browse all hosts in one place. Saving is disabled because one Save
+  could not safely rewrite every included file.
+
+  To edit your main config anyway: press W. You switch to a writable single-file view: only Host
+  blocks from that path are shown; save (s) still writes only that path. Included definitions are
+  hidden until you press W again (if you have no unsaved changes) or r (reload from disk), which
+  restores merged read-only browse if Include is still present.
 
 Host detail (split: tree | detail)
   tab       Focus tree vs detail pane
@@ -1408,8 +1652,6 @@ Host detail (split: tree | detail)
   X         Delete host (confirm)
   v / s     Raw editor / save
   esc       Back to tree
-
-Include: configs with Include are read-only; included files are merged for browsing.
 
 CLI: sshui list | sshui show HOST [--json] | sshui dump [--json] [--check] | sshui completion bash|zsh|fish
 
