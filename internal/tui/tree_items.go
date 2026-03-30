@@ -25,9 +25,9 @@ type hostRowEntry struct {
 	filter string
 }
 
-func (e hostRowEntry) Title() string             { return e.title }
-func (e hostRowEntry) Description() string       { return "" }
-func (e hostRowEntry) FilterValue() string       { return e.filter }
+func (e hostRowEntry) Title() string       { return e.title }
+func (e hostRowEntry) Description() string { return "" }
+func (e hostRowEntry) FilterValue() string { return e.filter }
 
 // groupPickItem is a target group for MoveHost.
 type groupPickItem struct {
@@ -36,9 +36,9 @@ type groupPickItem struct {
 	groupIdx  int
 }
 
-func (e groupPickItem) Title() string             { return e.label }
-func (e groupPickItem) Description() string     { return "" }
-func (e groupPickItem) FilterValue() string     { return e.label }
+func (e groupPickItem) Title() string       { return e.label }
+func (e groupPickItem) Description() string { return "" }
+func (e groupPickItem) FilterValue() string { return e.label }
 
 func directiveValue(h *scfg.HostBlock, keys ...string) string {
 	for _, want := range keys {

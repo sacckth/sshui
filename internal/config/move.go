@@ -24,8 +24,9 @@ func (cfg *Config) MoveHost(ref HostRef, toDefault bool, toGroupIdx int) error {
 
 func cloneHostBlock(h HostBlock) HostBlock {
 	out := HostBlock{
-		Patterns:   append([]string(nil), h.Patterns...),
-		Directives: make([]Directive, len(h.Directives)),
+		HostComments: append([]string(nil), h.HostComments...),
+		Patterns:     append([]string(nil), h.Patterns...),
+		Directives:   make([]Directive, len(h.Directives)),
 	}
 	copy(out.Directives, h.Directives)
 	return out

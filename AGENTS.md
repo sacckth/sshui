@@ -8,7 +8,7 @@ Guidance for humans and coding agents working on this repository.
 
 - **Upstream:** https://github.com/sacckth/sshui  
 - **Go module:** `github.com/sacckth/sshui`  
-- **Language / version:** Go 1.22+  
+- **Language / version:** Go 1.25+  
 - **License:** BSD 3-Clause (`LICENSE`)
 
 ## Repository layout
@@ -20,7 +20,8 @@ Guidance for humans and coding agents working on this repository.
 | `internal/appcfg/` | Optional TOML: `~/.config/sshui/config.toml` (see README for macOS path) |
 | `internal/sshkeywords/` | Static OpenSSH client keyword catalog for picker UX (not authoritative for OpenSSH) |
 | `internal/tui/` | Bubble Tea model: tree, host detail, directive picker, inputs, raw editor, save, themes |
-| `Makefile` | `build`, `test`, `dist` (darwin/arm64 + linux/amd64) |
+| `Makefile` | `build`, `test`, `dist`, `packages` (linux: deb/rpm/apk via nfpm; darwin-arm64 tarball) |
+| `nfpm.yaml` | Linux package metadata for [nfpm](https://github.com/goreleaser/nfpm); version injected by Makefile |
 | `README.md` | User-facing install/run and config table |
 
 **Imports:** Always use the module path `github.com/sacckth/sshui/...` for internal packages.
@@ -36,7 +37,7 @@ Save: backup prior bytes → config.Write → same path
 Reload: ReadFile + Parse (discards unsaved model)
 ```
 
-- **Parser** (`internal/config/parse.go`): Builds `DefaultHosts` + `Groups` with `#@group:`, `#@desc:`, `#@info:`, `#@host:` metadata; sets `HasInclude` if any `Include` directive line appears (Phase 1: **no** include merging; UI warns only).
+- **Parser** (`internal/config/parse.go`): Builds `DefaultHosts` + `Groups` with `#@group:`, `#@desc:`, `#@info:` on groups and `#@host:` lines attached to the **following** `Host` stanza (`HostBlock.HostComments`). Sets `HasInclude` if any `Include` directive appears. **`MergeIncludes`** (`include.go`) appends synthetic `include:<basename>` groups for merged browse when the TUI is read-only.
 - **Writer** (`internal/config/write.go`): Emits `Host` blocks and group banners; stable spacing; ends with newline.
 - **TUI** (`internal/tui/app.go` + `raweditor.go` + `theme.go`): Pointer receiver `*Model`; `Options` carries theme + default editor hint from appcfg.
 
@@ -95,7 +96,7 @@ After substantive edits, run `go test ./...` at minimum (`internal/config` and `
 
 ## Known limitations / future work
 
-- **Include:** Merged read or multi-file write is **not** implemented (Phase 1 warning only).  
+- **Include:** Write-back still targets only the primary file; merged included files are read-only in the UI.  
 - **Comments:** Non-metadata `#` lines are not preserved through parse/write.  
 - **Host ref validity:** After raw editor or destructive edits, `ValidateRef` may force navigation back to tree.
 

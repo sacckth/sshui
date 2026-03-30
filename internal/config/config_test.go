@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,6 +112,73 @@ func TestAddDeleteRenameGroup(t *testing.T) {
 	}
 	if len(cfg.Groups[0].Descriptions) != 1 || !strings.HasPrefix(cfg.Groups[0].Descriptions[0], "#@desc:") {
 		t.Fatalf("%+v", cfg.Groups[0].Descriptions)
+	}
+}
+
+func TestHostCommentsRoundTrip(t *testing.T) {
+	raw := `#@group: lab
+#@host: jump via bastion
+Host serv1
+    HostName 10.0.0.1
+    User u
+`
+	cfg, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Groups) != 1 || len(cfg.Groups[0].Hosts) != 1 {
+		t.Fatalf("structure: %+v", cfg.Groups)
+	}
+	h := cfg.Groups[0].Hosts[0]
+	if len(h.HostComments) != 1 || !strings.Contains(h.HostComments[0], "bastion") {
+		t.Fatalf("host comments: %+v", h.HostComments)
+	}
+	out, err := String(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Parse(strings.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg2.Groups[0].Hosts[0].HostComments) != 1 {
+		t.Fatalf("roundtrip lost comments: %+v", cfg2.Groups[0].Hosts[0].HostComments)
+	}
+}
+
+func TestMergeIncludes(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "config")
+	incPath := filepath.Join(dir, "extra.conf")
+	mainContent := "Include " + incPath + "\nHost main\n    HostName m.example\n"
+	incContent := "Host inc\n    HostName i.internal\n"
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(incPath, []byte(incContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mainAbs, err := filepath.Abs(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Parse(strings.NewReader(mainContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HasInclude {
+		t.Fatal("expected HasInclude")
+	}
+	merged := MergeIncludes(mainAbs, cfg)
+	var found bool
+	for _, g := range merged.Groups {
+		if strings.HasPrefix(g.Name, "include:") && len(g.Hosts) > 0 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected include:* group, groups=%+v", merged.Groups)
 	}
 }
 

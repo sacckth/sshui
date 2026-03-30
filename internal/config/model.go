@@ -6,10 +6,12 @@ type Directive struct {
 	Value string
 }
 
-// HostBlock is an OpenSSH Host stanza (patterns as on the Host line).
+// HostBlock is one OpenSSH Host stanza (patterns as on the Host line).
+// HostComments holds sshclick-style metadata lines (#@host: …) before this stanza.
 type HostBlock struct {
-	Patterns   []string
-	Directives []Directive
+	HostComments []string
+	Patterns     []string
+	Directives   []Directive
 }
 
 // Group is a logical section introduced by #@group: (sshclick-style metadata).

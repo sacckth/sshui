@@ -88,10 +88,17 @@ func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, te
 		return m, nil
 	}
 
-	m.cfg = cfg
+	if cfg.HasInclude {
+		m.cfg = scfg.MergeIncludes(m.path, cfg)
+		m.readOnly = true
+	} else {
+		m.cfg = cfg
+		m.readOnly = false
+	}
 	m.dirty = true
 	m.rebuildHostList()
 	if m.mode == modeDetail {
+		m.layoutDetailPanes()
 		if m.cfg.ValidateRef(m.selRef) != nil {
 			m.mode = modeTree
 		} else {

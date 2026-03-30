@@ -10,6 +10,10 @@ import (
 func Write(w io.Writer, cfg *Config) error {
 	var b strings.Builder
 	writeBlock := func(hb HostBlock) {
+		for _, c := range hb.HostComments {
+			b.WriteString(c)
+			b.WriteByte('\n')
+		}
 		b.WriteString("Host ")
 		b.WriteString(strings.Join(hb.Patterns, " "))
 		b.WriteByte('\n')
@@ -103,8 +107,9 @@ func (cfg *Config) DuplicateHost(ref HostRef, newPatterns []string) error {
 	}
 	src := cfg.HostAt(ref)
 	dup := HostBlock{
-		Patterns:   append([]string(nil), newPatterns...),
-		Directives: make([]Directive, len(src.Directives)),
+		HostComments: append([]string(nil), src.HostComments...),
+		Patterns:     append([]string(nil), newPatterns...),
+		Directives:   make([]Directive, len(src.Directives)),
 	}
 	copy(dup.Directives, src.Directives)
 	if ref.InDefault {

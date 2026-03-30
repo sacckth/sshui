@@ -1,13 +1,18 @@
 package tui
 
 import (
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // applyTheme sets global lipgloss styles used by lists and chrome.
 func applyTheme(name string) {
+	if os.Getenv("NO_COLOR") != "" {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "warm":
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("208"))

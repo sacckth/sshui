@@ -9,8 +9,8 @@ import (
 
 // Parse reads an OpenSSH client config from r into Config.
 // sshclick-style lines #@group:, #@desc:, #@info:, #@host: are interpreted;
-// other comment lines outside Host stanzas are ignored. Phase 1: HasInclude is
-// set if any Include directive appears; caller should warn.
+// other comment lines outside Host stanzas are ignored. HasInclude is
+// set if any Include directive appears; caller should warn or merge.
 func Parse(r io.Reader) (*Config, error) {
 	cfg := &Config{}
 	sc := bufio.NewScanner(r)
@@ -18,6 +18,7 @@ func Parse(r io.Reader) (*Config, error) {
 
 	var currentGroup *Group
 	var currentHost *HostBlock
+	var pendingHostMeta []string
 
 	ensureGroup := func(name string) *Group {
 		name = strings.TrimSpace(name)
@@ -48,10 +49,12 @@ func Parse(r io.Reader) (*Config, error) {
 				case metaGroup:
 					currentGroup = ensureGroup(meta.payload)
 					currentHost = nil
-				case metaDesc, metaInfo, metaHostTag:
+				case metaDesc, metaInfo:
 					if currentGroup != nil {
 						currentGroup.Descriptions = append(currentGroup.Descriptions, trimmed)
 					}
+				case metaHostTag:
+					pendingHostMeta = append(pendingHostMeta, trimmed)
 				}
 			}
 			continue
@@ -68,7 +71,12 @@ func Parse(r io.Reader) (*Config, error) {
 			if len(patterns) == 0 {
 				patterns = []string{""}
 			}
-			hb := HostBlock{Patterns: patterns, Directives: nil}
+			hb := HostBlock{
+				HostComments: append([]string(nil), pendingHostMeta...),
+				Patterns:     patterns,
+				Directives:   nil,
+			}
+			pendingHostMeta = nil
 			if currentGroup == nil {
 				cfg.DefaultHosts = append(cfg.DefaultHosts, hb)
 				currentHost = &cfg.DefaultHosts[len(cfg.DefaultHosts)-1]
@@ -80,8 +88,12 @@ func Parse(r io.Reader) (*Config, error) {
 		}
 
 		if currentHost == nil {
-			// Global directives before any Host — treat as anonymous host "*" for safety
-			hb := HostBlock{Patterns: []string{"*"}, Directives: nil}
+			hb := HostBlock{
+				HostComments: append([]string(nil), pendingHostMeta...),
+				Patterns:     []string{"*"},
+				Directives:   nil,
+			}
+			pendingHostMeta = nil
 			cfg.DefaultHosts = append(cfg.DefaultHosts, hb)
 			currentHost = &cfg.DefaultHosts[len(cfg.DefaultHosts)-1]
 		}
@@ -119,16 +131,17 @@ type meta struct {
 }
 
 func parseMetaComment(trimmed string) (meta, bool) {
-	rest := strings.TrimPrefix(trimmed, "#")
-	rest = strings.TrimSpace(rest)
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "#"))
 	switch {
 	case strings.HasPrefix(rest, "@group:"):
 		return meta{kind: metaGroup, payload: strings.TrimSpace(strings.TrimPrefix(rest, "@group:"))}, true
-	case strings.HasPrefix(rest, "@desc:"):
+	case strings.HasPrefix(rest, "group:"):
+		return meta{kind: metaGroup, payload: strings.TrimSpace(strings.TrimPrefix(rest, "group:"))}, true
+	case strings.HasPrefix(rest, "@desc:"), strings.HasPrefix(rest, "desc:"):
 		return meta{kind: metaDesc}, true
-	case strings.HasPrefix(rest, "@info:"):
+	case strings.HasPrefix(rest, "@info:"), strings.HasPrefix(rest, "info:"):
 		return meta{kind: metaInfo}, true
-	case strings.HasPrefix(rest, "@host:"):
+	case strings.HasPrefix(rest, "@host:"), strings.HasPrefix(rest, "host:"):
 		return meta{kind: metaHostTag}, true
 	default:
 		return meta{}, false

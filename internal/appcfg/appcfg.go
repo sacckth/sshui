@@ -11,9 +11,10 @@ import (
 
 // Config is optional UI and path configuration. Omitted fields use CLI/env defaults.
 type Config struct {
-	SSHConfig string `toml:"ssh_config"` // default SSH client config path
-	Editor    string `toml:"editor"`     // shell fragment, e.g. vim or `code --wait` (passed to sh -c)
-	Theme     string `toml:"theme"`      // default | warm | muted
+	SSHConfig          string `toml:"ssh_config"`            // default SSH client config path
+	Editor             string `toml:"editor"`                // shell fragment, e.g. vim or `code --wait` (passed to sh -c)
+	Theme              string `toml:"theme"`                 // default | warm | muted
+	SSHConfigGitMirror string `toml:"ssh_config_git_mirror"` // optional: copy saved config here (e.g. dotfiles repo)
 }
 
 // FilePath returns the path to config.toml (may not exist yet).

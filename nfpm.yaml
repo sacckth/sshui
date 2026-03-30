@@ -1,0 +1,30 @@
+# https://nfpm.goreleaser.com/configuration/
+# Version line is rewritten by Makefile (see dist/nfpm-gen.yaml) from cmd/sshui version.
+name: sshui
+arch: amd64
+platform: linux
+version: 0.0.0
+
+maintainer: "sacckth <https://github.com/sacckth/sshui>"
+description: |
+  Terminal UI for editing OpenSSH client configuration (~/.ssh/config).
+vendor: sacckth
+homepage: https://github.com/sacckth/sshui
+license: BSD-3-Clause
+
+contents:
+  - src: ./dist/linux-amd64/sshui
+    dst: /usr/bin/sshui
+    file_info:
+      mode: 0755
+
+deb:
+  compression: xz
+  fields:
+    Bugs: https://github.com/sacckth/sshui/issues
+
+rpm:
+  compression: zstd
+
+apk:
+  # Alpine uses different script options; nfpm generates valid APK index metadata
