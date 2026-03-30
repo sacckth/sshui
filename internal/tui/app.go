@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -217,7 +218,26 @@ func (m *Model) openPicker() {
 	m.mode = modePicker
 }
 
+// hiddenBackupPath returns a dot-prefixed backup path beside the config file
+// (e.g. ~/.ssh/config → ~/.ssh/.config.bkp).
+func hiddenBackupPath(configPath string) string {
+	dir := filepath.Dir(configPath)
+	base := filepath.Base(configPath)
+	return filepath.Join(dir, "."+base+".bkp")
+}
+
 func (m *Model) save() error {
+	prev, err := os.ReadFile(m.path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read existing file for backup: %w", err)
+	}
+	if err == nil {
+		bkp := hiddenBackupPath(m.path)
+		if werr := os.WriteFile(bkp, prev, 0o600); werr != nil {
+			return fmt.Errorf("write backup %s: %w", bkp, werr)
+		}
+	}
+
 	f, err := os.OpenFile(m.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -641,5 +661,7 @@ Host detail
 
 Optional: ~/.config/sshui/config.toml — ssh_config, editor, theme (default|warm|muted).
 
-Back up ~/.ssh/config before heavy use; saving rewrites the file with stable formatting.
+Each save writes a hidden backup of the prior on-disk file next to it (e.g. .ssh/.config.bkp for .ssh/config).
+
+Saving still rewrites the main file with stable formatting.
 `
