@@ -41,11 +41,22 @@ Set `NO_COLOR=1` to disable ANSI colors in the TUI.
 go build -o sshui ./cmd/sshui/
 ```
 
+**Makefile:** run `make` or `make help` for targets (`build`, `test`, `dist`, `packages`, `tag-push`, …).
+
 Cross-compile: `make dist` (Darwin arm64 + Linux amd64).
 
 **Packages:** `make packages` builds a static **linux/amd64** binary and produces **`.deb`**, **`.rpm`**, and **`.apk`** under `dist/` (via [nfpm](https://github.com/goreleaser/nfpm)), plus **`sshui-<version>-linux-amd64.tar.gz`** and **`sshui-<version>-darwin-arm64.tar.gz`**. Override version with `make packages VERSION=1.0.0`. Requires Go only (nfpm is run with `go run`).
 
-**GitHub Releases:** push a tag **`v*`** whose numeric part matches `version` in `cmd/sshui/main.go` (e.g. tag `v0.2.0` when `main.go` has `version = "0.2.0"`). The [Release workflow](.github/workflows/release.yml) builds the same artifacts, adds `SHA256SUMS`, and attaches them to a GitHub Release.
+### GitHub Releases (where builds appear)
+
+Official binaries are **not** uploaded by `make` alone; they show up under the repo’s **Releases** tab after CI runs.
+
+1. Set `version = "x.y.z"` in `cmd/sshui/main.go` and commit (this string must match the tag, see below).
+2. Push to `main` (or your default branch) so the commit is on GitHub.
+3. Run **`make tag-push`** (creates annotated tag `vx.y.z` and `git push origin vx.y.z`). Requires a clean working tree unless `ALLOW_DIRTY=1`.
+4. The [Release workflow](.github/workflows/release.yml) starts on **`push` of tags `v*`**. It checks that **`vx.y.z` without the `v`** equals `version` in `cmd/sshui/main.go`, runs tests, runs **`make packages`**, writes **`dist/SHA256SUMS`**, and publishes a **GitHub Release** with the `.deb`, `.rpm`, `.apk`, tarballs, and checksum file.
+
+If the workflow fails the version check, fix `main.go` or delete the bad tag and tag again. After success, open **[github.com/sacckth/sshui/releases](https://github.com/sacckth/sshui/releases)** and pick the new tag to download assets.
 
 ## Run
 

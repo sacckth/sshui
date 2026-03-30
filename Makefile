@@ -1,7 +1,9 @@
-.PHONY: build test dist clean \
+.PHONY: help build test dist clean \
 	package-linux-amd64 package-darwin-arm64 \
 	pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux \
 	packages packages-all tag-push
+
+.DEFAULT_GOAL := help
 
 BINARY := sshui
 CMD := ./cmd/sshui/
@@ -19,60 +21,64 @@ DARWIN_LDFLAGS := -s -w -X main.version=$(VERSION)
 
 NFPM := go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.2
 
+help: ## Show available targets and short descriptions
+	@echo "sshui Makefile — VERSION=$(VERSION) (from cmd/sshui/main.go)"
+	@echo ""
+	@grep -hE '^[a-zA-Z][a-zA-Z0-9_-]*:.*##' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-24s %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Override version for packaging: make packages VERSION=1.0.0"
+	@echo "Tag with a dirty tree (not recommended): ALLOW_DIRTY=1 make tag-push"
+
 # nfpm has no --version flag; inject VERSION into a generated config.
 dist/nfpm-gen.yaml: nfpm.yaml
 	mkdir -p dist
 	sed 's/^version:.*/version: $(VERSION)/' nfpm.yaml > dist/nfpm-gen.yaml
 
-build:
+build: ## Compile binary to ./sshui
 	go build -o $(BINARY) $(CMD)
 
-test:
+test: ## Run go test ./...
 	go test ./...
 
-# Legacy flat binaries in dist/
-dist:
+dist: ## Cross-compile flat binaries to dist/ (darwin-arm64, linux-amd64)
 	mkdir -p dist
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(DARWIN_LDFLAGS)" -o dist/$(BINARY)-darwin-arm64 $(CMD)
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LINUX_LDFLAGS)" -o dist/$(BINARY)-linux-amd64 $(CMD)
 
 # Layout expected by nfpm (Linux amd64)
-package-linux-amd64:
+package-linux-amd64: ## Build static linux/amd64 binary under dist/linux-amd64/
 	mkdir -p dist/linux-amd64
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(LINUX_LDFLAGS)" -o dist/linux-amd64/$(BINARY) $(CMD)
 
 # macOS Apple Silicon — tarball for distribution (not deb/rpm/apk)
-package-darwin-arm64:
+package-darwin-arm64: ## Build darwin/arm64 binary under dist/darwin-arm64/
 	mkdir -p dist/darwin-arm64
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(DARWIN_LDFLAGS)" -o dist/darwin-arm64/$(BINARY) $(CMD)
 
-pkg-deb: package-linux-amd64 dist/nfpm-gen.yaml
+pkg-deb: package-linux-amd64 dist/nfpm-gen.yaml ## Build .deb into dist/
 	$(NFPM) package -f dist/nfpm-gen.yaml -p deb -t dist/
 
-pkg-rpm: package-linux-amd64 dist/nfpm-gen.yaml
+pkg-rpm: package-linux-amd64 dist/nfpm-gen.yaml ## Build .rpm into dist/
 	$(NFPM) package -f dist/nfpm-gen.yaml -p rpm -t dist/
 
-pkg-apk: package-linux-amd64 dist/nfpm-gen.yaml
+pkg-apk: package-linux-amd64 dist/nfpm-gen.yaml ## Build .apk into dist/
 	$(NFPM) package -f dist/nfpm-gen.yaml -p apk -t dist/
 
-pkg-tar-darwin: package-darwin-arm64
+pkg-tar-darwin: package-darwin-arm64 ## Tarball sshui-<version>-darwin-arm64.tar.gz in dist/
 	cd dist/darwin-arm64 && tar czf ../$(BINARY)-$(VERSION)-darwin-arm64.tar.gz $(BINARY)
 
-pkg-tar-linux: package-linux-amd64
+pkg-tar-linux: package-linux-amd64 ## Tarball sshui-<version>-linux-amd64.tar.gz in dist/
 	cd dist/linux-amd64 && tar czf ../$(BINARY)-$(VERSION)-linux-amd64.tar.gz $(BINARY)
 
-# All distributables: Linux packages + Linux/macOS tarballs
-packages: pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux
+packages: pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux ## All release artifacts under dist/
 	@echo "Outputs under dist/: .deb .rpm .apk *.tar.gz"
 
-packages-all: dist packages
+packages-all: dist packages ## Same as: make dist && make packages
 
-clean:
+clean: ## Remove dist/ and ./sshui
 	rm -rf dist $(BINARY)
 
-# Create annotated tag v$(VERSION) from cmd/sshui/main.go and push to origin.
-# Requires a clean working tree unless ALLOW_DIRTY=1. Fails if the tag exists locally.
-tag-push:
+tag-push: ## Annotated tag v<version> from main.go and push to origin (see README)
 	@git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: not a git repository"; exit 1; }
 ifndef ALLOW_DIRTY
 	@test -z "$$(git status --porcelain)" || { echo "error: uncommitted changes (commit or stash, or run with ALLOW_DIRTY=1)"; exit 1; }
