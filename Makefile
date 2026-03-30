@@ -1,7 +1,7 @@
 .PHONY: build test dist clean \
 	package-linux-amd64 package-darwin-arm64 \
 	pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux \
-	packages packages-all
+	packages packages-all tag-push
 
 BINARY := sshui
 CMD := ./cmd/sshui/
@@ -9,6 +9,9 @@ VERSION ?= $(shell sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"
 ifeq ($(VERSION),)
   VERSION := 0.0.0
 endif
+
+# Git release tag (must match .github/workflows/release.yml: v*)
+GIT_TAG := v$(VERSION)
 
 # Static Linux binary for packages; embed version at link time.
 LINUX_LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -66,3 +69,15 @@ packages-all: dist packages
 
 clean:
 	rm -rf dist $(BINARY)
+
+# Create annotated tag v$(VERSION) from cmd/sshui/main.go and push to origin.
+# Requires a clean working tree unless ALLOW_DIRTY=1. Fails if the tag exists locally.
+tag-push:
+	@git rev-parse --git-dir >/dev/null 2>&1 || { echo "error: not a git repository"; exit 1; }
+ifndef ALLOW_DIRTY
+	@test -z "$$(git status --porcelain)" || { echo "error: uncommitted changes (commit or stash, or run with ALLOW_DIRTY=1)"; exit 1; }
+endif
+	@git rev-parse $(GIT_TAG) >/dev/null 2>&1 && { echo "error: tag $(GIT_TAG) already exists"; exit 1; } || true
+	git tag -a $(GIT_TAG) -m "Release $(GIT_TAG)"
+	git push origin $(GIT_TAG)
+	@echo "Pushed $(GIT_TAG)"
