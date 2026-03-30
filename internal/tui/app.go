@@ -239,6 +239,13 @@ func (m *Model) layoutDetailPanes() {
 	m.detailList.SetHeight(ph)
 }
 
+// layoutTreeList restores host list dimensions after split-pane detail view (narrow
+// tree) so the Host / HostName / User columns render at full terminal width.
+func (m *Model) layoutTreeList() {
+	m.hostList.SetWidth(m.width)
+	m.hostList.SetHeight(max(6, m.height-4))
+}
+
 func (m *Model) syncTreeSelection() {
 	items := m.hostList.Items()
 	for i, it := range items {
@@ -495,6 +502,7 @@ func (m *Model) reloadFromDisk() {
 	}
 	m.dirty = false
 	m.rebuildHostList()
+	m.layoutTreeList()
 	m.status = "Reloaded from disk."
 }
 
@@ -532,6 +540,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modeDetail {
 				m.layoutDetailPanes()
 				m.refreshDetailList()
+			} else if m.mode == modeTree {
+				m.layoutTreeList()
 			}
 		}
 		if msg.err != nil {
@@ -552,6 +562,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeHelp:
 			m.mode = modeTree
+			m.layoutTreeList()
 			return m, nil
 
 		case modeConfirmDeleteHost:
@@ -560,17 +571,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.readOnly {
 					m.status = errStyle.Render("Read-only.")
 					m.mode = m.confirmReturnMode
+					if m.confirmReturnMode == modeDetail {
+						m.layoutDetailPanes()
+						m.refreshDetailList()
+					} else if m.confirmReturnMode == modeTree {
+						m.layoutTreeList()
+					}
 					return m, nil
 				}
 				m.cfg.DeleteHost(m.selRef)
 				m.dirty = true
-				m.rebuildHostList()
 				m.mode = modeTree
+				m.layoutTreeList()
+				m.rebuildHostList()
 				m.status = "Host deleted."
 			case "n", "N", "esc":
 				m.status = ""
 				m.mode = m.confirmReturnMode
 				if m.confirmReturnMode == modeDetail {
+					m.layoutDetailPanes()
 					m.refreshDetailList()
 				}
 			}
@@ -583,21 +602,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = errStyle.Render("Read-only.")
 					m.pendingDeleteGroupName = ""
 					m.mode = modeTree
+					m.layoutTreeList()
 					return m, nil
 				}
 				if err := m.cfg.DeleteGroupByName(m.pendingDeleteGroupName); err != nil {
 					m.status = errStyle.Render(err.Error())
 				} else {
 					m.dirty = true
-					m.rebuildHostList()
 					m.status = "Group removed; hosts moved to (default)."
 				}
 				m.pendingDeleteGroupName = ""
 				m.mode = modeTree
+				m.layoutTreeList()
+				m.rebuildHostList()
 			case "n", "N", "esc":
 				m.status = ""
 				m.pendingDeleteGroupName = ""
 				m.mode = modeTree
+				m.layoutTreeList()
 			}
 			return m, nil
 
@@ -724,8 +746,9 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dirty = true
-		m.rebuildHostList()
 		m.mode = modeTree
+		m.layoutTreeList()
+		m.rebuildHostList()
 		m.status = fmt.Sprintf("Created group %q.", name)
 
 	case modeInputRenameGroup:
@@ -926,6 +949,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.mode = modeTree
+			m.layoutTreeList()
 			m.rebuildHostList()
 			return m, nil
 		}
@@ -954,6 +978,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeTree
+		m.layoutTreeList()
 		m.rebuildHostList()
 		return m, nil
 	case msg.String() == "s":
@@ -1111,6 +1136,8 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mode == modeDetail {
 			m.layoutDetailPanes()
 			m.refreshDetailList()
+		} else if m.mode == modeTree {
+			m.layoutTreeList()
 		}
 		return m, nil
 	}
@@ -1122,6 +1149,8 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.mode == modeDetail {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
+				} else if m.mode == modeTree {
+					m.layoutTreeList()
 				}
 				return m, nil
 			case "ssh":
@@ -1144,6 +1173,8 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.mode == modeDetail {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
+				} else if m.mode == modeTree {
+					m.layoutTreeList()
 				}
 				return m, nil
 			}
@@ -1167,6 +1198,8 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		m.mode = modeDetail
+		m.layoutDetailPanes()
+		m.refreshDetailList()
 		return m, nil
 
 	case msg.String() == "enter":
@@ -1205,16 +1238,21 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.readOnly {
 				m.status = errStyle.Render("Read-only.")
 				m.mode = m.groupPickerReturnMode
+				if m.groupPickerReturnMode == modeDetail {
+					m.layoutDetailPanes()
+					m.refreshDetailList()
+				}
 				return m, nil
 			}
 			if err := m.cfg.MoveHost(m.selRef, it.toDefault, it.groupIdx); err != nil {
 				m.status = errStyle.Render(err.Error())
 			} else {
 				m.dirty = true
-				m.rebuildHostList()
 				m.status = fmt.Sprintf("Moved host to %q.", it.label)
 			}
 			m.mode = modeTree
+			m.layoutTreeList()
+			m.rebuildHostList()
 			return m, nil
 		}
 	}

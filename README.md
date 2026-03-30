@@ -43,7 +43,9 @@ go build -o sshui ./cmd/sshui/
 
 Cross-compile: `make dist` (Darwin arm64 + Linux amd64).
 
-**Packages:** `make packages` builds a static **linux/amd64** binary and produces **`.deb`**, **`.rpm`**, and **`.apk`** under `dist/` (via [nfpm](https://github.com/goreleaser/nfpm)), plus **`sshui-<version>-darwin-arm64.tar.gz`** for macOS Apple Silicon. Override version with `make packages VERSION=1.0.0`. Requires Go only (nfpm is run with `go run`).
+**Packages:** `make packages` builds a static **linux/amd64** binary and produces **`.deb`**, **`.rpm`**, and **`.apk`** under `dist/` (via [nfpm](https://github.com/goreleaser/nfpm)), plus **`sshui-<version>-linux-amd64.tar.gz`** and **`sshui-<version>-darwin-arm64.tar.gz`**. Override version with `make packages VERSION=1.0.0`. Requires Go only (nfpm is run with `go run`).
+
+**GitHub Releases:** push a tag **`v*`** whose numeric part matches `version` in `cmd/sshui/main.go` (e.g. tag `v0.2.0` when `main.go` has `version = "0.2.0"`). The [Release workflow](.github/workflows/release.yml) builds the same artifacts, adds `SHA256SUMS`, and attaches them to a GitHub Release.
 
 ## Run
 

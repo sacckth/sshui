@@ -98,12 +98,15 @@ func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, te
 	m.dirty = true
 	m.rebuildHostList()
 	if m.mode == modeDetail {
-		m.layoutDetailPanes()
 		if m.cfg.ValidateRef(m.selRef) != nil {
 			m.mode = modeTree
+			m.layoutTreeList()
 		} else {
+			m.layoutDetailPanes()
 			m.refreshDetailList()
 		}
+	} else if m.mode == modeTree {
+		m.layoutTreeList()
 	}
 	m.status = "Replaced in-memory config from editor buffer (save with s)."
 	if msg.err != nil {

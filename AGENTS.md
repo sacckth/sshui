@@ -22,6 +22,7 @@ Guidance for humans and coding agents working on this repository.
 | `internal/tui/` | Bubble Tea model: tree, host detail, directive picker, inputs, raw editor, save, themes |
 | `Makefile` | `build`, `test`, `dist`, `packages` (linux: deb/rpm/apk via nfpm; darwin-arm64 tarball) |
 | `nfpm.yaml` | Linux package metadata for [nfpm](https://github.com/goreleaser/nfpm); version injected by Makefile |
+| `.github/workflows/release.yml` | On push of tag `v*`, verifies tag matches `cmd/sshui/main.go` version, runs `make packages`, uploads deb/rpm/apk/tarballs + `SHA256SUMS` to GitHub Releases |
 | `README.md` | User-facing install/run and config table |
 
 **Imports:** Always use the module path `github.com/sacckth/sshui/...` for internal packages.

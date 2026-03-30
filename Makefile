@@ -1,6 +1,6 @@
 .PHONY: build test dist clean \
 	package-linux-amd64 package-darwin-arm64 \
-	pkg-deb pkg-rpm pkg-apk pkg-tar-darwin \
+	pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux \
 	packages packages-all
 
 BINARY := sshui
@@ -55,9 +55,12 @@ pkg-apk: package-linux-amd64 dist/nfpm-gen.yaml
 pkg-tar-darwin: package-darwin-arm64
 	cd dist/darwin-arm64 && tar czf ../$(BINARY)-$(VERSION)-darwin-arm64.tar.gz $(BINARY)
 
-# All distributables: Linux packages + macOS tarball
-packages: pkg-deb pkg-rpm pkg-apk pkg-tar-darwin
-	@echo "Outputs under dist/: .deb .rpm .apk and $(BINARY)-$(VERSION)-darwin-arm64.tar.gz"
+pkg-tar-linux: package-linux-amd64
+	cd dist/linux-amd64 && tar czf ../$(BINARY)-$(VERSION)-linux-amd64.tar.gz $(BINARY)
+
+# All distributables: Linux packages + Linux/macOS tarballs
+packages: pkg-deb pkg-rpm pkg-apk pkg-tar-darwin pkg-tar-linux
+	@echo "Outputs under dist/: .deb .rpm .apk *.tar.gz"
 
 packages-all: dist packages
 
