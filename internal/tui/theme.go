@@ -32,11 +32,15 @@ var groupHeaderDimStyle lipgloss.Style
 // Pane chrome (disabled when NO_COLOR).
 var paneLeftStyle lipgloss.Style
 var paneRightStyle lipgloss.Style
+var paneRightActiveStyle lipgloss.Style
 var paneSepStyle lipgloss.Style
 var footerRuleStyle lipgloss.Style
 
 // paneFill is the unified split-pane background (left, right, separator). Empty when NO_COLOR.
 var paneFill lipgloss.TerminalColor
+
+// paneRightActiveFill is the right pane background when the detail pane has focus (slightly offset from paneFill).
+var paneRightActiveFill lipgloss.TerminalColor
 
 // paneFillActive is true when split panes use a solid ANSI background.
 var paneFillActive bool
@@ -56,7 +60,7 @@ func applyTheme(name string) {
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("150"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("222"))
 		fill := lipgloss.Color("236")
-		setPaneStyles(noColor, fill, lipgloss.Color("244"))
+		setPaneStyles(noColor, fill, lipgloss.Color("235"), lipgloss.Color("244"))
 		setGroupHeaderStyles(noColor, fill, lipgloss.Color("214"), lipgloss.Color("223"))
 	case "muted":
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
@@ -66,7 +70,7 @@ func applyTheme(name string) {
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("108"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("185"))
 		fill := lipgloss.Color("237")
-		setPaneStyles(noColor, fill, lipgloss.Color("242"))
+		setPaneStyles(noColor, fill, lipgloss.Color("236"), lipgloss.Color("242"))
 		setGroupHeaderStyles(noColor, fill, lipgloss.Color("247"), lipgloss.Color("252"))
 	default:
 		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
@@ -76,7 +80,7 @@ func applyTheme(name string) {
 		readOnlyBannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 		writableWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 		fill := lipgloss.Color("236")
-		setPaneStyles(noColor, fill, lipgloss.Color("245"))
+		setPaneStyles(noColor, fill, lipgloss.Color("235"), lipgloss.Color("245"))
 		setGroupHeaderStyles(noColor, fill, lipgloss.Color("81"), lipgloss.Color("159"))
 	}
 	if noColor {
@@ -98,27 +102,26 @@ func applyTheme(name string) {
 			Background(paneFill).
 			Foreground(lipgloss.Color("252"))
 	}
-	if paneFillActive {
-		colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245")).Background(paneFill)
-	} else {
-		colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
-	}
 }
 
-func setPaneStyles(noColor bool, fill, sepFG lipgloss.TerminalColor) {
+func setPaneStyles(noColor bool, fill, rightActiveFill, sepFG lipgloss.TerminalColor) {
 	if noColor {
 		paneFillActive = false
 		paneFill = lipgloss.NoColor{}
+		paneRightActiveFill = lipgloss.NoColor{}
 		paneLeftStyle = lipgloss.NewStyle()
 		paneRightStyle = lipgloss.NewStyle()
+		paneRightActiveStyle = lipgloss.NewStyle()
 		paneSepStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		footerRuleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		return
 	}
 	paneFillActive = true
 	paneFill = fill
+	paneRightActiveFill = rightActiveFill
 	paneLeftStyle = lipgloss.NewStyle().Background(fill)
 	paneRightStyle = lipgloss.NewStyle().Background(fill)
+	paneRightActiveStyle = lipgloss.NewStyle().Background(rightActiveFill)
 	paneSepStyle = lipgloss.NewStyle().Foreground(sepFG).Background(fill)
 	footerRuleStyle = lipgloss.NewStyle().Foreground(sepFG)
 }
@@ -179,6 +182,7 @@ func applyPaneChromeToList(l *list.Model) {
 	st.StatusEmpty = st.StatusEmpty.Copy().Background(bg)
 	st.StatusBarActiveFilter = st.StatusBarActiveFilter.Copy().Background(bg)
 	st.StatusBarFilterCount = st.StatusBarFilterCount.Copy().Background(bg)
+	st.DefaultFilterCharacterMatch = st.DefaultFilterCharacterMatch.Copy().Background(bg)
 	st.NoItems = st.NoItems.Copy().Background(bg)
 	st.PaginationStyle = st.PaginationStyle.Copy().Background(bg)
 	st.HelpStyle = st.HelpStyle.Copy().Background(bg)

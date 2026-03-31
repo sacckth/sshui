@@ -16,16 +16,18 @@ type HostBlock struct {
 
 // Group is a logical section introduced by #@group: (sshclick-style metadata).
 type Group struct {
-	Name         string
-	Descriptions []string
-	Hosts        []HostBlock
+	Name               string
+	Descriptions       []string
+	Hosts              []HostBlock
+	CollapsedByDefault bool // TUI: start folded; persisted as #@fold: - after group banner
 }
 
 // Config is the in-memory representation of a single ssh config file.
 type Config struct {
-	DefaultHosts []HostBlock
-	Groups       []Group
-	HasInclude   bool
+	DefaultHosts          []HostBlock
+	Groups                []Group
+	HasInclude            bool
+	DefaultHostsCollapsed bool // TUI: (default) section starts folded; persisted as #@default-fold: -
 }
 
 // HostRef addresses a host block within Config.

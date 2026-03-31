@@ -8,9 +8,10 @@ import (
 )
 
 // Parse reads an OpenSSH client config from r into Config.
-// sshclick-style lines #@group:, #@desc:, #@info:, #@host: are interpreted;
-// other comment lines outside Host stanzas are ignored. HasInclude is
-// set if any Include directive appears; caller should warn or merge.
+// sshclick-style lines #@group:, #@desc:, #@info:, #@host:, #@fold: (after #@group:),
+// and #@default-fold: (before default Host stanzas) are interpreted; other comment lines
+// outside Host stanzas are ignored. HasInclude is set if any Include directive appears;
+// caller should warn or merge.
 func Parse(r io.Reader) (*Config, error) {
 	cfg := &Config{}
 	sc := bufio.NewScanner(r)
@@ -55,6 +56,14 @@ func Parse(r io.Reader) (*Config, error) {
 					}
 				case metaHostTag:
 					pendingHostMeta = append(pendingHostMeta, trimmed)
+				case metaFold:
+					if currentGroup != nil {
+						currentGroup.CollapsedByDefault = parseFoldPayload(meta.payload)
+					}
+				case metaDefaultFold:
+					if currentGroup == nil {
+						cfg.DefaultHostsCollapsed = parseFoldPayload(meta.payload)
+					}
 				}
 			}
 			continue
@@ -123,6 +132,8 @@ const (
 	metaDesc
 	metaInfo
 	metaHostTag
+	metaFold
+	metaDefaultFold
 )
 
 type meta struct {
@@ -143,8 +154,27 @@ func parseMetaComment(trimmed string) (meta, bool) {
 		return meta{kind: metaInfo}, true
 	case strings.HasPrefix(rest, "@host:"), strings.HasPrefix(rest, "host:"):
 		return meta{kind: metaHostTag}, true
+	case strings.HasPrefix(rest, "@fold:"):
+		return meta{kind: metaFold, payload: strings.TrimSpace(strings.TrimPrefix(rest, "@fold:"))}, true
+	case strings.HasPrefix(rest, "fold:"):
+		return meta{kind: metaFold, payload: strings.TrimSpace(strings.TrimPrefix(rest, "fold:"))}, true
+	case strings.HasPrefix(rest, "@default-fold:"):
+		return meta{kind: metaDefaultFold, payload: strings.TrimSpace(strings.TrimPrefix(rest, "@default-fold:"))}, true
+	case strings.HasPrefix(rest, "default-fold:"):
+		return meta{kind: metaDefaultFold, payload: strings.TrimSpace(strings.TrimPrefix(rest, "default-fold:"))}, true
 	default:
 		return meta{}, false
+	}
+}
+
+// parseFoldPayload returns true when the fold metadata means "start collapsed".
+func parseFoldPayload(payload string) bool {
+	p := strings.ToLower(strings.TrimSpace(payload))
+	switch p {
+	case "-", "collapsed", "fold", "folded", "yes", "y", "1", "true":
+		return true
+	default:
+		return false
 	}
 }
 

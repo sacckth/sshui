@@ -27,6 +27,9 @@ func Write(w io.Writer, cfg *Config) error {
 		}
 	}
 
+	if cfg.DefaultHostsCollapsed {
+		b.WriteString("#@default-fold: -\n")
+	}
 	for _, hb := range cfg.DefaultHosts {
 		writeBlock(hb)
 		b.WriteByte('\n')
@@ -39,6 +42,9 @@ func Write(w io.Writer, cfg *Config) error {
 		for _, desc := range g.Descriptions {
 			b.WriteString(desc)
 			b.WriteByte('\n')
+		}
+		if g.CollapsedByDefault {
+			b.WriteString("#@fold: -\n")
 		}
 		for _, hb := range g.Hosts {
 			writeBlock(hb)

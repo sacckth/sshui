@@ -18,15 +18,18 @@ const listEllipsis = "…"
 
 // groupHeaderEntry is a section label in the host tree (collapse/expand via z).
 type groupHeaderEntry struct {
-	label     string
-	collapsed bool
+	label      string
+	collapsed  bool
+	defaultSec bool // true for the (default) pseudo-group
+	groupIdx   int  // index into cfg.Groups when !defaultSec
 }
 
 func (e groupHeaderEntry) Title() string {
+	sign := "- "
 	if e.collapsed {
-		return "▸ " + e.label
+		sign = "+ "
 	}
-	return "▾ " + e.label
+	return sign + e.label
 }
 
 func (e groupHeaderEntry) Description() string { return "" }
@@ -91,26 +94,28 @@ func HostConnectivityTitle(h *scfg.HostBlock) string {
 	}
 }
 
-const hostListIndent = "  "
+const (
+	treeBranchMid = "├── "
+	treeBranchEnd = "└── "
+)
 
-func hostListInnerWidth(totalWidth int) int {
-	inner := totalWidth - runewidth.StringWidth(hostListIndent)
+func treeHostPrefix(hostIndex, hostCount int) string {
+	if hostCount <= 1 {
+		return treeBranchEnd
+	}
+	if hostIndex < hostCount-1 {
+		return treeBranchMid
+	}
+	return treeBranchEnd
+}
+
+func formatHostListLine(prefix, alias string, totalWidth int) string {
+	pw := runewidth.StringWidth(prefix)
+	inner := totalWidth - pw
 	if inner < 4 {
 		inner = 4
 	}
-	return inner
-}
-
-// HostListColumnHeader aligns with formatHostListLine (single Host column).
-func HostListColumnHeader(totalWidth int) string {
-	inner := hostListInnerWidth(totalWidth)
-	h := runewidth.Truncate("Host", inner, listEllipsis)
-	return hostListIndent + h
-}
-
-func formatHostListLine(alias string, totalWidth int) string {
-	inner := hostListInnerWidth(totalWidth)
-	return hostListIndent + runewidth.Truncate(alias, inner, listEllipsis)
+	return prefix + runewidth.Truncate(alias, inner, listEllipsis)
 }
 
 func groupDescEditPreview(lines []string) string {
@@ -123,23 +128,28 @@ func groupDescEditPreview(lines []string) string {
 	return ""
 }
 
-// buildHostItems builds tree rows. collapsed keys are group labels "(default)" or group name.
+// buildHostItems builds tree rows. Fold state comes from cfg (DefaultHostsCollapsed, Group.CollapsedByDefault).
 // When ignoreCollapse is true (active host filter), all groups are shown expanded for matching.
-func buildHostItems(cfg *scfg.Config, totalWidth int, collapsed map[string]bool, ignoreCollapse bool) []list.Item {
+func buildHostItems(cfg *scfg.Config, totalWidth int, ignoreCollapse bool) []list.Item {
 	if totalWidth < 12 {
 		totalWidth = 48
 	}
-	if collapsed == nil {
-		collapsed = map[string]bool{}
-	}
 	var items []list.Item
 
-	items = append(items, groupHeaderEntry{label: "(default)", collapsed: collapsed["(default)"]})
-	if !collapsed["(default)"] || ignoreCollapse {
+	defCollapsed := cfg.DefaultHostsCollapsed && !ignoreCollapse
+	items = append(items, groupHeaderEntry{
+		label:      "(default)",
+		collapsed:  defCollapsed,
+		defaultSec: true,
+		groupIdx:   -1,
+	})
+	if !defCollapsed || ignoreCollapse {
+		n := len(cfg.DefaultHosts)
 		for i := range cfg.DefaultHosts {
 			h := &cfg.DefaultHosts[i]
 			al := hostAlias(h)
-			line := formatHostListLine(al, totalWidth)
+			prefix := treeHostPrefix(i, n)
+			line := formatHostListLine(prefix, al, totalWidth)
 			items = append(items, hostRowEntry{
 				title: line,
 				ref:   scfg.HostRef{InDefault: true, HostIdx: i},
@@ -149,14 +159,22 @@ func buildHostItems(cfg *scfg.Config, totalWidth int, collapsed map[string]bool,
 
 	for gi := range cfg.Groups {
 		g := &cfg.Groups[gi]
-		items = append(items, groupHeaderEntry{label: g.Name, collapsed: collapsed[g.Name]})
-		if collapsed[g.Name] && !ignoreCollapse {
+		collapsed := g.CollapsedByDefault && !ignoreCollapse
+		items = append(items, groupHeaderEntry{
+			label:      g.Name,
+			collapsed:  collapsed,
+			defaultSec: false,
+			groupIdx:   gi,
+		})
+		if collapsed && !ignoreCollapse {
 			continue
 		}
+		n := len(g.Hosts)
 		for hi := range g.Hosts {
 			h := &g.Hosts[hi]
 			al := hostAlias(h)
-			line := formatHostListLine(al, totalWidth)
+			prefix := treeHostPrefix(hi, n)
+			line := formatHostListLine(prefix, al, totalWidth)
 			items = append(items, hostRowEntry{
 				title: line,
 				ref:   scfg.HostRef{InDefault: false, GroupIdx: gi, HostIdx: hi},

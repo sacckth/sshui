@@ -93,8 +93,6 @@ type Model struct {
 	actionMenuList   list.Model
 	actionReturnMode viewMode
 
-	collapsedGroups map[string]bool
-
 	appConfigPath    string
 	themeName        string
 	appCfgReturnMode viewMode
@@ -105,12 +103,11 @@ type Model struct {
 }
 
 var (
-	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	statusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	helpStyle      = lipgloss.NewStyle().Padding(1, 2)
-	colHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("245"))
-	panelBorder    = lipgloss.RoundedBorder()
+	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	helpStyle   = lipgloss.NewStyle().Padding(1, 2)
+	panelBorder = lipgloss.RoundedBorder()
 )
 
 type actionItem struct {
@@ -149,12 +146,11 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		mirrorPath:         opts.MirrorPath,
 		detailTab:          detailTabAll,
 		treePaneFocused:    false,
-		collapsedGroups:    make(map[string]bool),
 		appConfigPath:      opts.AppConfigPath,
 		themeName:          opts.Theme,
 	}
 	lw := m.leftPaneWidth()
-	hostItems := buildHostItems(cfg, lw, m.collapsedGroups, false)
+	hostItems := buildHostItems(cfg, lw, false)
 	l := list.New(hostItems, newHostTreeDelegate(), lw, max(6, h-4))
 	l.Title = "Hosts by group  c=new  z=fold header  D=del group"
 	l.Styles.Title = titleStyle
@@ -248,7 +244,7 @@ func (m *Model) updateHostList(msg tea.Msg) tea.Cmd {
 // FilterMatchesMsg is processed — callers must return the returned tea.Cmd so refilter runs.
 func (m *Model) rebuildHostList() tea.Cmd {
 	lw := m.leftPaneWidth()
-	items := buildHostItems(m.cfg, lw, m.collapsedGroups, m.ignoreCollapseForActiveFilter())
+	items := buildHostItems(m.cfg, lw, m.ignoreCollapseForActiveFilter())
 	cmd := m.hostList.SetItems(items)
 	if m.hostList.FilterState() == list.Unfiltered {
 		m.syncTreeSelection()
@@ -313,7 +309,7 @@ func (m *Model) toggleIncludeEditMode() tea.Cmd {
 		return rb
 	}
 	if m.dirty {
-		m.status = errStyle.Render("Save (s) or reload (r) before switching back to merged Include view.")
+		m.status = errStyle.Render("Write (w) or reload (r) before switching back to merged Include view.")
 		return nil
 	}
 	data, err := os.ReadFile(m.path)
@@ -406,12 +402,7 @@ func (m *Model) rightPaneWidth() int {
 func (m *Model) layoutDetailPanes() {
 	ph := max(5, m.height-5)
 	m.hostList.SetWidth(m.leftPaneWidth())
-	// Browse (tree) draws a 1-line column header above the list inside the left pane.
-	if m.mode == modeTree {
-		m.hostList.SetHeight(max(4, ph-1))
-	} else {
-		m.hostList.SetHeight(ph)
-	}
+	m.hostList.SetHeight(ph)
 	m.detailList.SetWidth(m.rightPaneWidth())
 	m.detailList.SetHeight(ph)
 }
@@ -478,6 +469,7 @@ func (m *Model) newDetailList() list.Model {
 		rh = max(5, m.height-5)
 	}
 	delegate := newDetailListDelegate()
+	m.applyDetailListDelegateBG(&delegate)
 
 	var items []list.Item
 	var title string
@@ -510,10 +502,8 @@ func (m *Model) newDetailList() list.Model {
 	l.Title = title
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
-	filterOK := m.cfg.ValidateRef(m.selRef) == nil
-	l.SetFilteringEnabled(filterOK && (m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity))
+	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	patchFilterAcceptKeys(&l)
 	applyPaneChromeToList(&l)
 	return l
 }
@@ -531,7 +521,7 @@ func detailTabTitle(t detailTab) string {
 
 func (m *Model) overviewPanel() string {
 	rw := max(1, m.rightPaneWidth()-2)
-	boxStyle := paneRightStyle.Copy().Border(panelBorder).Padding(0, 1).Width(rw)
+	boxStyle := m.rightPaneBoxStyle(rw)
 	if m.cfg.ValidateRef(m.selRef) != nil {
 		return boxStyle.Render(statusStyle.Render("No host selected."))
 	}
@@ -560,8 +550,68 @@ func firstStr(s, def string) string {
 	return s
 }
 
+// rightPaneBoxStyle is the bordered panel style for the right pane (overview / inactive vs active detail).
+func (m *Model) rightPaneBoxStyle(contentWidth int) lipgloss.Style {
+	st := paneRightStyle.Copy().Border(panelBorder).Padding(0, 1).Width(contentWidth)
+	if m.mode == modeDetail && !m.treePaneFocused && paneFillActive {
+		return paneRightActiveStyle.Copy().Border(panelBorder).Padding(0, 1).Width(contentWidth)
+	}
+	return st
+}
+
+func (m *Model) detailListItemBG() lipgloss.TerminalColor {
+	if !paneFillActive {
+		return lipgloss.NoColor{}
+	}
+	if m.mode == modeDetail && !m.treePaneFocused {
+		return paneRightActiveFill
+	}
+	return paneFill
+}
+
+func (m *Model) applyDetailListDelegateBG(d *list.DefaultDelegate) {
+	bg := m.detailListItemBG()
+	if !paneFillActive {
+		return
+	}
+	d.Styles.NormalTitle = d.Styles.NormalTitle.Copy().Padding(0, 0, 0, 0).Background(bg)
+	d.Styles.NormalDesc = d.Styles.NormalDesc.Copy().Padding(0, 0, 0, 0).Background(bg)
+	d.Styles.DimmedTitle = d.Styles.DimmedTitle.Copy().Padding(0, 0, 0, 0).Background(bg)
+	d.Styles.DimmedDesc = d.Styles.DimmedDesc.Copy().Padding(0, 0, 0, 0).Background(bg)
+	d.Styles.SelectedTitle = lipgloss.NewStyle().Bold(true).Background(bg).Foreground(lipgloss.Color("255"))
+	d.Styles.SelectedDesc = lipgloss.NewStyle().Bold(true).Background(bg).Foreground(lipgloss.Color("252"))
+}
+
+func (m *Model) toggleFoldAt(gh groupHeaderEntry) {
+	if gh.defaultSec {
+		m.cfg.DefaultHostsCollapsed = !m.cfg.DefaultHostsCollapsed
+	} else if gh.groupIdx >= 0 && gh.groupIdx < len(m.cfg.Groups) {
+		g := &m.cfg.Groups[gh.groupIdx]
+		g.CollapsedByDefault = !g.CollapsedByDefault
+	}
+	if !m.readOnly {
+		m.dirty = true
+	}
+}
+
 func (m *Model) refreshDetailList() {
 	m.detailList = m.newDetailList()
+}
+
+// pickKwEntryAsNewDirective starts value input for a new directive chosen from the keyword picker.
+func (m *Model) pickKwEntryAsNewDirective(it kwEntry) (tea.Model, tea.Cmd) {
+	m.returnAfterInput = modeDetail
+	m.editDirectiveIndex = -1
+	m.pendingDirectiveKey = it.Name
+	m.mode = modeInputDirectiveValue
+	m.valueInput.SetValue("")
+	h := ""
+	if it.Hint != "" {
+		h = it.Hint
+	}
+	m.valueInput.Placeholder = h
+	m.valueInput.Focus()
+	return m, textinput.Blink
 }
 
 func (m *Model) openPicker() {
@@ -715,6 +765,7 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 	l.Title = "Actions"
 	l.Styles.Title = titleStyle
 	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
 	applyPaneChromeToList(&l)
@@ -788,8 +839,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hostList.SetHeight(max(6, msg.Height-4))
 		}
 		if m.mode == modePicker {
-			m.pickerList.SetWidth(msg.Width)
-			m.pickerList.SetHeight(max(6, msg.Height-3))
+			m.pickerList.SetWidth(m.rightPaneWidth())
+			m.pickerList.SetHeight(max(6, m.height-5))
 		}
 		if m.mode == modeGroupPicker {
 			m.groupPickerList.SetWidth(msg.Width)
@@ -806,6 +857,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layoutHelpViewport()
 		}
 		return m, nil
+
+	// Bubbles schedules filter reflow asynchronously; the message must reach the list that
+	// requested it. Otherwise picker filtering updates the host list (and the picker never narrows).
+	case list.FilterMatchesMsg:
+		switch m.mode {
+		case modePicker:
+			var cmd tea.Cmd
+			m.pickerList, cmd = m.pickerList.Update(msg)
+			return m, cmd
+		case modeTree, modeDetail:
+			return m, m.updateHostList(msg)
+		default:
+			return m, nil
+		}
 
 	case shellProcDoneMsg:
 		if m.mode == modeActionMenu {
@@ -919,7 +984,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.dirty = true
 					m.status = "Group removed; hosts moved to (default)."
-					delete(m.collapsedGroups, name)
 					if gi >= 0 {
 						if !oldRef.InDefault && oldRef.GroupIdx == gi {
 							m.selRef = scfg.HostRef{InDefault: true, HostIdx: nDef + oldRef.HostIdx}
@@ -1185,10 +1249,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "z":
 		if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
-			m.collapsedGroups[gh.label] = !m.collapsedGroups[gh.label]
-			if !m.collapsedGroups[gh.label] {
-				delete(m.collapsedGroups, gh.label)
-			}
+			m.toggleFoldAt(gh)
 			rb := m.rebuildHostList()
 			m.syncBrowsePreview()
 			return m, rb
@@ -1204,13 +1265,21 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openHelp(modeTree)
 		return m, nil
 
-	case msg.String() == "s":
+	case msg.String() == "w":
 		if err := m.save(); err != nil {
 			m.status = errStyle.Render("Save: " + err.Error())
 		} else {
 			m.status = "Saved."
 		}
 		return m, nil
+
+	case msg.String() == "s":
+		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			m.selRef = row.ref
+			if m.cfg.ValidateRef(m.selRef) == nil {
+				return m, m.sshExecCmd(false)
+			}
+		}
 
 	case msg.String() == "r":
 		return m, m.reloadFromDisk()
@@ -1343,14 +1412,26 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.String() == "tab":
 			m.treePaneFocused = false
+			m.refreshDetailList()
 			return m, nil
 		case msg.String() == "z":
 			if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
-				m.collapsedGroups[gh.label] = !m.collapsedGroups[gh.label]
-				if !m.collapsedGroups[gh.label] {
-					delete(m.collapsedGroups, gh.label)
-				}
+				m.toggleFoldAt(gh)
 				return m, m.rebuildHostList()
+			}
+		case msg.String() == "w":
+			if err := m.save(); err != nil {
+				m.status = errStyle.Render("Save: " + err.Error())
+			} else {
+				m.status = "Saved."
+			}
+			return m, nil
+		case msg.String() == "s":
+			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+				m.selRef = row.ref
+				if m.cfg.ValidateRef(m.selRef) == nil {
+					return m, m.sshExecCmd(false)
+				}
 			}
 		case msg.String() == "$":
 			return m, m.openAppConfigEditor()
@@ -1374,21 +1455,11 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.detailTab == detailTabAll || m.detailTab == detailTabConnectivity {
-		if m.detailList.SettingFilter() {
-			if tryFilterListArrowNav(&m.detailList, msg) {
-				return m, nil
-			}
-			var cmd tea.Cmd
-			m.detailList, cmd = m.detailList.Update(msg)
-			return m, cmd
-		}
-	}
-
 	switch {
 	case msg.String() == "tab":
 		m.treePaneFocused = true
 		m.syncTreeSelection()
+		m.refreshDetailList()
 		return m, nil
 	case msg.String() == "?":
 		m.openHelp(modeDetail)
@@ -1406,13 +1477,17 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openAppConfigEditor()
 	case msg.String() == "&":
 		return m.openAppConfigView(modeDetail)
-	case msg.String() == "s":
+	case msg.String() == "w":
 		if err := m.save(); err != nil {
 			m.status = errStyle.Render("Save: " + err.Error())
 		} else {
 			m.status = "Saved."
 		}
 		return m, nil
+	case msg.String() == "s":
+		if m.cfg.ValidateRef(m.selRef) == nil {
+			return m, m.sshExecCmd(false)
+		}
 	case msg.String() == "A":
 		m.openActionMenu(modeDetail)
 		m.actionMenuList.SetWidth(actionMenuOuterWidth(m.width))
@@ -1618,6 +1693,14 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if tryFilterListArrowNav(&m.pickerList, msg) {
 			return m, nil
 		}
+		// Enter: choose the highlighted match and add that directive (no separate "apply filter" step).
+		if isEnterKey(msg) && strings.TrimSpace(m.pickerList.FilterValue()) != "" {
+			if len(m.pickerList.VisibleItems()) > 0 {
+				if kw, ok := m.pickerList.SelectedItem().(kwEntry); ok {
+					return m.pickKwEntryAsNewDirective(kw)
+				}
+			}
+		}
 		var cmd tea.Cmd
 		m.pickerList, cmd = m.pickerList.Update(msg)
 		return m, cmd
@@ -1632,18 +1715,7 @@ func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case msg.String() == "enter":
 		if it, ok := m.pickerList.SelectedItem().(kwEntry); ok {
-			m.returnAfterInput = modeDetail
-			m.editDirectiveIndex = -1
-			m.pendingDirectiveKey = it.Name
-			m.mode = modeInputDirectiveValue
-			m.valueInput.SetValue("")
-			h := ""
-			if it.Hint != "" {
-				h = it.Hint
-			}
-			m.valueInput.Placeholder = h
-			m.valueInput.Focus()
-			return m, textinput.Blink
+			return m.pickKwEntryAsNewDirective(it)
 		}
 	}
 
@@ -1744,7 +1816,7 @@ func paneSepLines(height int) string {
 	return buf.String()
 }
 
-func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int) string {
+func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int, rightPaneActive bool) string {
 	lw := m.leftPaneWidth()
 	rw := m.rightPaneWidth()
 	leftBody = padVisualLines(leftBody, lw)
@@ -1752,7 +1824,11 @@ func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int) strin
 	leftBody = ensureMinVisualLines(leftBody, lw, paneHeight)
 	rightBody = ensureMinVisualLines(rightBody, rw, paneHeight)
 	leftBox := paneLeftStyle.Width(lw).Height(paneHeight).Render(leftBody)
-	rightBox := paneRightStyle.Width(rw).Height(paneHeight).Render(rightBody)
+	rightStyle := paneRightStyle
+	if rightPaneActive {
+		rightStyle = paneRightActiveStyle
+	}
+	rightBox := rightStyle.Width(rw).Height(paneHeight).Render(rightBody)
 	sep := paneSepStyle.Render(paneSepLines(paneHeight))
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, sep, rightBox)
 }
@@ -1796,13 +1872,25 @@ func (m Model) View() string {
 	}
 	switch m.mode {
 	case modeHelp:
-		title := titleStyle.Render("sshui — help")
-		hint := statusStyle.Render("Esc — close help (only Esc exits) · ↑↓ PgUp/PgDn Space scroll")
+		titleSt := titleStyle
+		hintSt := statusStyle
+		if paneFillActive {
+			titleSt = titleSt.Copy().Background(paneFill)
+			hintSt = hintSt.Copy().Background(paneFill)
+		}
+		title := titleSt.Render("sshui — help")
+		hint := hintSt.Render("Esc — close help (only Esc exits) · ↑↓ PgUp/PgDn Space scroll")
 		body := m.helpViewport.View()
 		box := lipgloss.JoinVertical(lipgloss.Left, title, "", body, "", hint)
 		innerW := min(max(48, m.width-4), m.width-2)
 		framed := lipgloss.NewStyle().Border(panelBorder).Padding(0, 1).Width(innerW).Render(box)
-		b.WriteString(lipgloss.Place(m.width, max(12, m.height-2), lipgloss.Center, lipgloss.Top, framed))
+		headerLines := strings.Count(b.String(), "\n") + 1
+		placeH := max(1, m.height-headerLines)
+		var placeOpts []lipgloss.WhitespaceOption
+		if paneFillActive {
+			placeOpts = append(placeOpts, lipgloss.WithWhitespaceBackground(paneFill))
+		}
+		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Top, framed, placeOpts...))
 		return b.String()
 
 	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
@@ -1812,7 +1900,13 @@ func (m Model) View() string {
 
 	case modeActionMenu:
 		menu := m.renderActionMenuBox()
-		b.WriteString(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, menu))
+		headerLines := strings.Count(b.String(), "\n") + 1
+		placeH := max(1, m.height-headerLines)
+		var placeOpts []lipgloss.WhitespaceOption
+		if paneFillActive {
+			placeOpts = append(placeOpts, lipgloss.WithWhitespaceBackground(paneFill))
+		}
+		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Center, menu, placeOpts...))
 		return b.String()
 
 	case modeInputDirectiveValue, modeInputNewHost, modeInputDuplicateHost, modeInputNewGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta:
@@ -1855,14 +1949,14 @@ func (m Model) View() string {
 		} else {
 			right = m.detailList.View()
 		}
-		b.WriteString(m.joinSplitPanes(left, right, ph))
+		b.WriteString(m.joinSplitPanes(left, right, ph, m.mode == modeDetail && !m.treePaneFocused))
 		b.WriteByte('\n')
 		focus := "detail"
 		if m.treePaneFocused {
 			focus = "tree"
 		}
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"focus %s | tab | t tabs | W Include | i meta | A actions | a k add | e d D g m o X | v s | $ cfg | & view cfg | z fold | esc tree",
+			"focus %s | tab | t tabs | W Include | i meta | A actions | s ssh | a k add | e d D g m o X | v w | $ cfg | & view cfg | z fold | esc tree",
 			focus,
 		)))
 		return b.String()
@@ -1870,7 +1964,7 @@ func (m Model) View() string {
 	case modePicker:
 		b.WriteString(m.pickerList.View())
 		b.WriteByte('\n')
-		b.WriteString(statusStyle.Render("enter pick | esc cancel"))
+		b.WriteString(statusStyle.Render("/ filter · ↑↓ pick · enter add · esc cancel"))
 		return b.String()
 
 	case modeGroupPicker:
@@ -1885,9 +1979,7 @@ func (m Model) View() string {
 
 	default: // tree (browse): hosts by group | directive preview
 		ph := max(5, m.height-5)
-		lw := m.leftPaneWidth()
-		header := colHeaderStyle.Width(lw).Render(HostListColumnHeader(lw))
-		left := lipgloss.JoinVertical(lipgloss.Left, header, m.hostList.View())
+		left := m.hostList.View()
 		var right string
 		if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
 			right = m.detailList.View()
@@ -1897,10 +1989,10 @@ func (m Model) View() string {
 				Foreground(lipgloss.Color("245")).
 				Render("Select a host row to preview directives.\n\nTip: c creates a group; header: z fold, D delete group.")
 		}
-		b.WriteString(m.joinSplitPanes(left, right, ph))
+		b.WriteString(m.joinSplitPanes(left, right, ph, false))
 		b.WriteByte('\n')
 		m.writeStatusFooter(&b, statusStyle.Render(
-			"enter editor | W Include | A | n host | c group | z fold | D del grp | x host | g move | v raw | $ app cfg | & view cfg | / filter (Host column) | s r ? q",
+			"enter editor | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | v raw | $ app cfg | & view cfg | / filter | w r ? q",
 		))
 		return b.String()
 	}
@@ -1924,7 +2016,8 @@ Browse (split view)
   v         Raw $EDITOR buffer (SSH config buffer, not sshui settings)
   $         Open sshui app config (~/.config/sshui/config.toml) in $EDITOR
   &         View sshui app config in a read-only scrollable pane (esc/q close)
-  s / r     Save / reload
+  s         SSH to selected host (single non-wildcard Host pattern)
+  w / r     Write (save) / reload
   W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
   ?         Open this help (scroll with arrows / PgUp / PgDn / Space; Esc closes help only)
   q         Quit (from browse)
@@ -1936,7 +2029,7 @@ Include / read-only (merged view)
   could not safely rewrite every included file.
 
   To edit your main config anyway: press W. You switch to a writable single-file view: only Host
-  blocks from that path are shown; save (s) still writes only that path. Included definitions are
+  blocks from that path are shown; write (w) still writes only that path. Included definitions are
   hidden until you press W again (if you have no unsaved changes) or r (reload from disk), which
   restores merged read-only browse if Include is still present.
 
@@ -1945,13 +2038,14 @@ Host detail (split: tree | detail)
   t         Cycle tab: Overview → All directives → Connectivity
   i         Edit #@host metadata lines (multiline)
   A         Actions menu (ssh / sftp / copy)
-  a / k     Add directive (picker / custom key)
+  s         SSH to this host (same as Actions → ssh)
+  a / k     Add directive (picker: / to filter, enter to add selected keyword / custom key)
   e / d     Edit value / delete directive
   D         Duplicate host
   g         Move host to another group
   m / o     Rename group / edit #@desc
   X         Delete host (confirm)
-  v / s     Raw editor / save
+  v / w     Raw editor / write (save)
   $ / &     Edit / view sshui app config (same as browse mode)
   z         Fold group on tree (when header selected)
   esc       Back to tree

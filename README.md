@@ -89,7 +89,9 @@ sshui --config "$(pwd)/docs/readme-demo.conf"
 
 ![Illustrative browse view](docs/screenshots/browse.png)
 
-![Illustrative detail view](docs/screenshots/detail.png)
+![Illustrative detailed view](docs/screenshots/detail.png)
+
+![Illustrative directive view](docs/screenshots/directive.png)
 
 ![Illustrative filter view](docs/screenshots/filter.png)
 

@@ -115,6 +115,43 @@ func TestAddDeleteRenameGroup(t *testing.T) {
 	}
 }
 
+func TestFoldMetadataRoundTrip(t *testing.T) {
+	raw := `#@default-fold: -
+Host local
+    HostName localhost
+
+#@group: work
+#@fold: -
+Host srv
+    HostName srv.internal
+`
+	cfg, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DefaultHostsCollapsed {
+		t.Fatal("expected DefaultHostsCollapsed")
+	}
+	if len(cfg.Groups) != 1 || !cfg.Groups[0].CollapsedByDefault {
+		t.Fatalf("group fold: %+v", cfg.Groups)
+	}
+	out, err := String(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Parse(strings.NewReader(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg2.DefaultHostsCollapsed || len(cfg2.Groups) != 1 || !cfg2.Groups[0].CollapsedByDefault {
+		t.Fatalf("roundtrip fold flags: default=%v group=%+v", cfg2.DefaultHostsCollapsed, cfg2.Groups[0])
+	}
+	s2, _ := String(cfg2)
+	if s2 != out {
+		t.Fatalf("second roundtrip mismatch:\n%s\nvs\n%s", out, s2)
+	}
+}
+
 func TestHostCommentsRoundTrip(t *testing.T) {
 	raw := `#@group: lab
 #@host: jump via bastion
