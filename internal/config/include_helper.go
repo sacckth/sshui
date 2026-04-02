@@ -49,14 +49,14 @@ func AppendInclude(mainPath, targetAbs string) error {
 		}
 	}
 
-	footer := fmt.Sprintf("\n%s\nInclude %s\n", sshuiManagedMarker, targetAbs)
+	footer := fmt.Sprintf("\n%s\nHost *\n    Include %s\n", sshuiManagedMarker, targetAbs)
 
 	var out []byte
 	if len(data) == 0 {
 		if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(mainPath), err)
 		}
-		out = []byte(fmt.Sprintf("%s\nInclude %s\n", sshuiManagedMarker, targetAbs))
+		out = []byte(fmt.Sprintf("%s\nHost *\n    Include %s\n", sshuiManagedMarker, targetAbs))
 	} else {
 		s := string(data)
 		if !strings.HasSuffix(s, "\n") {

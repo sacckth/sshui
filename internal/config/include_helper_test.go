@@ -12,7 +12,7 @@ func TestIsSSHUIManaged(t *testing.T) {
 	mainPath := filepath.Join(dir, "config")
 
 	// File with marker.
-	content := "#sshui-managed\nInclude /tmp/ssh_hosts\n\nHost foo\n  HostName bar\n"
+	content := "#sshui-managed\nHost *\n    Include /tmp/ssh_hosts\n\nHost foo\n  HostName bar\n"
 	if err := os.WriteFile(mainPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +56,9 @@ func TestAppendInclude(t *testing.T) {
 	}
 	if !strings.Contains(content, "Include "+target) {
 		t.Fatalf("Include not found: %q", content)
+	}
+	if !strings.Contains(content, "Host *") {
+		t.Fatalf("Host * wrapper not found: %q", content)
 	}
 	// Include should be at the end, after original content.
 	markerIdx := strings.Index(content, sshuiManagedMarker)
