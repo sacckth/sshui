@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,17 +17,29 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sacckth/sshui/internal/appcfg"
 	scfg "github.com/sacckth/sshui/internal/config"
+	"github.com/sacckth/sshui/internal/lockfile"
+	"github.com/sacckth/sshui/internal/overlay"
 	"github.com/sacckth/sshui/internal/sshkeywords"
 )
 
 // Options carries theme and editor preferences (from ~/.config/sshui/config.toml).
 type Options struct {
+	Version       string
 	Theme         string
 	Editor        string
 	ReadOnly      bool   // true: merged Include browse (see help); false: single-file editable
 	MirrorPath    string // optional: after save, copy bytes here (expanded abs path)
 	AppConfigPath string // absolute path to sshui config.toml (not SSH config)
+
+	SSHHostsPath       string         // absolute path to the sshui ssh_hosts file
+	MainSSHConfigPath  string         // absolute path to the user's main ssh_config (for export wizard)
+	OverlayPath        string         // absolute path to password_hosts.toml
+	Overlay            *overlay.File  // pre-loaded password overlay (nil = none)
+	BrowseMode         string         // initial browse mode: merged | openssh | password
+	AppConfig          *appcfg.Config // pointer for saving wizard flags
+	ExportWizardNeeded bool           // show the setup wizard on startup (config.toml missing)
 }
 
 type viewMode int
@@ -51,6 +64,16 @@ const (
 	modeAppCfgView
 	modeSSHConnectPending
 	modeSSHConnectWildcardInput
+	modeExportWizard
+	modeNewHostTypePicker
+	modeInputNewPasswordHost
+	modeInputPasswordField
+	modeNewGroupTypePicker
+	modeInputNewPasswordGroup
+	modePasswordDetail
+	modePasswordDetailEdit
+	modePasswordDetailInput
+	modeLockConflict
 )
 
 type detailTab int
@@ -63,31 +86,35 @@ const (
 
 // Model is the root Bubble Tea model for sshui.
 type Model struct {
-	cfg    *scfg.Config
-	path   string
-	dirty  bool
-	width  int
-	height int
-	mode   viewMode
+	cfg     *scfg.Config
+	path    string
+	version string
+	dirty   bool
+	width   int
+	height  int
+	mode    viewMode
 
 	hostList        list.Model
 	detailList      list.Model
+	pwDetailList    list.Model // password host fields (browse preview + password detail)
 	pickerList      list.Model
 	groupPickerList list.Model
 
 	valueInput textinput.Model
 	keyInput   textinput.Model
 
-	selRef                 scfg.HostRef
-	pendingDirectiveKey    string
-	editDirectiveIndex     int // >=0 when editing value; -1 when adding
-	status                 string
-	editor                 string // from app config; VISUAL/EDITOR used when empty
-	confirmReturnMode      viewMode
-	returnAfterInput       viewMode
-	groupPickerReturnMode  viewMode
-	pendingDeleteGroupName string
-	editGroupIdx           int
+	selRef                    scfg.HostRef
+	pendingDirectiveKey       string
+	editDirectiveIndex        int // >=0 when editing value; -1 when adding
+	status                    string
+	editor                    string // from app config; VISUAL/EDITOR used when empty
+	confirmReturnMode         viewMode
+	returnAfterInput          viewMode
+	groupPickerReturnMode     viewMode
+	pendingDeleteGroupName    string
+	pendingDeletePwIdx        int  // >=0: confirm deletes overlay PasswordHosts[idx]; -1: OpenSSH host delete
+	pendingDeleteOverlayGroup bool // true: confirm deletes password overlay group (not ssh config)
+	editGroupIdx              int
 
 	readOnly         bool
 	mirrorPath       string
@@ -114,6 +141,26 @@ type Model struct {
 	sshConnectWildSuffix       string
 	sshConnectWildPattern      string // first Host pattern (for prompts)
 	sshPostWildKind            sshPostWildKind
+
+	// Browse mode: merged, openssh, password
+	browseMode string
+	// Edit mode: false = read-only browse/inspect; true = mutations enabled (lock held)
+	editMode bool
+	// Password overlay
+	overlayData       *overlay.File
+	overlayPath       string
+	sshHostsPath      string
+	mainSSHConfigPath string
+	appConfig         *appcfg.Config
+	// Lock state per file
+	lockedSSHHosts bool
+	lockedOverlay  bool
+	// Setup wizard
+	exportWizardNeeded bool
+	wizardStep         int // 0=ssh_config, 1=ssh_hosts, 2=overlay, 3=copy question
+	// Password host detail
+	pwSelIdx       int    // index into overlayData.PasswordHosts
+	pwEditFieldKey string // toml field id while editing (hostname, patterns, …)
 }
 
 var (
@@ -147,9 +194,15 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	ki.Width = 40
 	ki.Placeholder = "DirectiveKey (custom / future keywords)"
 
+	browseMode := opts.BrowseMode
+	if browseMode == "" {
+		browseMode = appcfg.BrowseModeMerged
+	}
+
 	m := &Model{
 		cfg:                cfg,
 		path:               path,
+		version:            opts.Version,
 		width:              w,
 		height:             h,
 		valueInput:         ti,
@@ -162,11 +215,21 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		treePaneFocused:    false,
 		appConfigPath:      opts.AppConfigPath,
 		themeName:          opts.Theme,
+
+		browseMode:         browseMode,
+		overlayData:        opts.Overlay,
+		overlayPath:        opts.OverlayPath,
+		sshHostsPath:       opts.SSHHostsPath,
+		mainSSHConfigPath:  opts.MainSSHConfigPath,
+		appConfig:          opts.AppConfig,
+		exportWizardNeeded: opts.ExportWizardNeeded,
+		pwSelIdx:           -1,
+		pendingDeletePwIdx: -1,
 	}
 	lw := m.leftPaneWidth()
-	hostItems := buildHostItems(cfg, lw, false)
+	hostItems := buildHostItemsFiltered(cfg, m.overlayData, m.browseMode, lw, false)
 	l := list.New(hostItems, newHostTreeDelegate(), lw, max(6, h-4))
-	l.Title = "Hosts by group  c=new  z=fold header  D=del group"
+	l.Title = m.logoLine()
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
@@ -183,11 +246,18 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	}
 	// detailList must exist before layoutDetailPanes — a zero list.Model panics on SetSize.
 	m.detailList = m.newDetailList()
+	m.refreshPasswordDetailList()
 	m.layoutDetailPanes()
 	return m
 }
 
 func (m *Model) Init() tea.Cmd {
+	if m.exportWizardNeeded {
+		m.mode = modeExportWizard
+		m.wizardStep = 0
+		m.wizardPrepareStep()
+		return textinput.Blink
+	}
 	return nil
 }
 
@@ -204,6 +274,17 @@ type dirEntry struct {
 func (e dirEntry) Title() string       { return e.d.Key }
 func (e dirEntry) Description() string { return e.d.Value }
 func (e dirEntry) FilterValue() string { return e.d.Key }
+
+// pwFieldEntry is one editable row in the password host detail list.
+type pwFieldEntry struct {
+	key   string // display label
+	field string // hostname, patterns, user, port, askpass, askpass_require, display, group
+	val   string // shown as description
+}
+
+func (e pwFieldEntry) Title() string       { return e.key }
+func (e pwFieldEntry) Description() string { return e.val }
+func (e pwFieldEntry) FilterValue() string { return e.key }
 
 type kwEntry sshkeywords.Entry
 
@@ -258,7 +339,7 @@ func (m *Model) updateHostList(msg tea.Msg) tea.Cmd {
 // FilterMatchesMsg is processed — callers must return the returned tea.Cmd so refilter runs.
 func (m *Model) rebuildHostList() tea.Cmd {
 	lw := m.leftPaneWidth()
-	items := buildHostItems(m.cfg, lw, m.ignoreCollapseForActiveFilter())
+	items := buildHostItemsFiltered(m.cfg, m.overlayData, m.browseMode, lw, m.ignoreCollapseForActiveFilter())
 	cmd := m.hostList.SetItems(items)
 	if m.hostList.FilterState() == list.Unfiltered {
 		m.syncTreeSelection()
@@ -271,6 +352,7 @@ func (m *Model) resyncSelectionAfterStructureChange() {
 	if m.cfg.ValidateRef(m.selRef) == nil {
 		m.syncTreeSelection()
 		m.refreshDetailList()
+		m.refreshPasswordDetailList()
 		return
 	}
 	var iterate []list.Item
@@ -287,6 +369,7 @@ func (m *Model) resyncSelectionAfterStructureChange() {
 		}
 	}
 	m.refreshDetailList()
+	m.refreshPasswordDetailList()
 }
 
 // toggleIncludeEditMode switches between merged read-only browse (all Include files) and
@@ -417,25 +500,35 @@ func (m *Model) layoutDetailPanes() {
 	ph := max(5, m.height-5)
 	m.hostList.SetWidth(m.leftPaneWidth())
 	m.hostList.SetHeight(ph)
-	m.detailList.SetWidth(m.rightPaneWidth())
+	rw := m.rightPaneWidth()
+	m.detailList.SetWidth(rw)
 	m.detailList.SetHeight(ph)
+	m.pwDetailList.SetWidth(rw)
+	m.pwDetailList.SetHeight(ph)
 }
 
-// syncBrowsePreview updates selRef and the directive preview when the cursor is on a
-// host row in tree (browse) mode.
+// syncBrowsePreview updates selRef/pwSelIdx and the right-pane preview when the
+// cursor moves in tree (browse) mode.
 func (m *Model) syncBrowsePreview() {
 	if m.mode != modeTree {
 		return
 	}
-	row, ok := m.hostList.SelectedItem().(hostRowEntry)
-	if !ok {
-		return
+	switch it := m.hostList.SelectedItem().(type) {
+	case passwordHostRowEntry:
+		m.pwSelIdx = it.idx
+		m.refreshPasswordDetailList()
+	case hostRowEntry:
+		if m.selRef == it.ref {
+			return
+		}
+		m.selRef = it.ref
+		m.pwSelIdx = -1
+		m.refreshDetailList()
+		m.refreshPasswordDetailList()
+	case groupHeaderEntry:
+		m.pwSelIdx = -1
+		m.refreshPasswordDetailList()
 	}
-	if m.selRef == row.ref {
-		return
-	}
-	m.selRef = row.ref
-	m.refreshDetailList()
 }
 
 func (m *Model) syncTreeSelection() {
@@ -473,6 +566,83 @@ func (m *Model) readOnlyBlocked() bool {
 	}
 	m.status = "Read-only: merged Include view — Press W to edit the main file only, or ? for help."
 	return true
+}
+
+// cycleBrowseMode rotates merged → openssh → password.
+func (m *Model) cycleBrowseMode() tea.Cmd {
+	switch m.browseMode {
+	case appcfg.BrowseModeMerged:
+		m.browseMode = appcfg.BrowseModeOpenSSH
+	case appcfg.BrowseModeOpenSSH:
+		m.browseMode = appcfg.BrowseModePassword
+	default:
+		m.browseMode = appcfg.BrowseModeMerged
+	}
+	m.status = "Browse: " + m.browseMode
+	if m.appConfig != nil {
+		m.appConfig.Hosts.BrowseMode = m.browseMode
+		_ = appcfg.Save(m.appConfig)
+	}
+	rb := m.rebuildHostList()
+	m.resyncSelectionAfterStructureChange()
+	return rb
+}
+
+// enterEditMode acquires locks and switches to edit mode.
+func (m *Model) enterEditMode() {
+	if m.editMode {
+		return
+	}
+	if m.sshHostsPath != "" {
+		if err := lockfile.Acquire(m.sshHostsPath); err != nil {
+			if lockfile.IsLocked(err) {
+				m.status = errStyle.Render("Lock: " + err.Error())
+				return
+			}
+		}
+		m.lockedSSHHosts = true
+	}
+	if m.overlayPath != "" {
+		if err := lockfile.Acquire(m.overlayPath); err != nil {
+			if lockfile.IsLocked(err) {
+				m.status = errStyle.Render("Overlay lock: " + err.Error())
+				if m.lockedSSHHosts {
+					_ = lockfile.Release(m.sshHostsPath)
+					m.lockedSSHHosts = false
+				}
+				return
+			}
+		}
+		m.lockedOverlay = true
+	}
+	m.editMode = true
+}
+
+// exitEditMode releases locks and returns to read mode.
+func (m *Model) exitEditMode() {
+	if !m.editMode {
+		return
+	}
+	m.editMode = false
+	if m.lockedSSHHosts {
+		_ = lockfile.Release(m.sshHostsPath)
+		m.lockedSSHHosts = false
+	}
+	if m.lockedOverlay {
+		_ = lockfile.Release(m.overlayPath)
+		m.lockedOverlay = false
+	}
+}
+
+// editModeBlocked ensures edit mode is active before mutating; acquires locks.
+func (m *Model) editModeBlocked() bool {
+	if m.readOnlyBlocked() {
+		return true
+	}
+	if !m.editMode {
+		m.enterEditMode()
+	}
+	return !m.editMode
 }
 
 func (m *Model) newDetailList() list.Model {
@@ -786,6 +956,19 @@ func (m *Model) sshExecCmd() tea.Cmd {
 			return shellProcDoneMsg{err: fmt.Errorf("empty ssh target")}
 		}
 	}
+
+	// Check if this target matches a password overlay host.
+	if m.overlayData != nil {
+		if ph := m.overlayData.MatchHost(target); ph != nil {
+			args := buildPasswordSSHArgs(ph)
+			c := exec.Command("ssh", args...)
+			c.Env = append(os.Environ(), ph.AskpassEnv()...)
+			return tea.ExecProcess(c, func(err error) tea.Msg {
+				return shellProcDoneMsg{err: err}
+			})
+		}
+	}
+
 	sftp := m.sshConnectPendingSFTP
 	var c *exec.Cmd
 	if sftp {
@@ -936,6 +1119,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layoutDetailPanes()
 			rb := m.rebuildHostList()
 			m.detailList = m.newDetailList()
+			m.refreshPasswordDetailList()
 			return m, rb
 		default:
 			m.hostList.SetWidth(msg.Width)
@@ -962,6 +1146,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeSSHConnectPending || m.mode == modeSSHConnectWildcardInput {
 			m.layoutDetailPanes()
 		}
+		if m.mode == modePasswordDetail || m.mode == modePasswordDetailEdit {
+			m.layoutDetailPanes()
+			m.refreshPasswordDetailList()
+		}
 		return m, nil
 
 	// Bubbles schedules filter reflow asynchronously; the message must reach the list that
@@ -971,6 +1159,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modePicker:
 			var cmd tea.Cmd
 			m.pickerList, cmd = m.pickerList.Update(msg)
+			return m, cmd
+		case modePasswordDetail:
+			var cmd tea.Cmd
+			m.pwDetailList, cmd = m.pwDetailList.Update(msg)
 			return m, cmd
 		case modeTree, modeDetail:
 			return m, m.updateHostList(msg)
@@ -1044,6 +1236,82 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpViewport, vcmd = m.helpViewport.Update(msg)
 			return m, vcmd
 
+		case modeExportWizard:
+			return m.handleExportWizard(msg)
+
+		case modeNewHostTypePicker:
+			switch msg.String() {
+			case "o", "O", "enter":
+				return m, m.startNewOpenSSHHost()
+			case "p", "P":
+				return m, m.startNewPasswordHost()
+			case "esc":
+				m.mode = modeTree
+				return m, nil
+			}
+			return m, nil
+
+		case modeNewGroupTypePicker:
+			switch msg.String() {
+			case "o", "O", "enter":
+				return m, m.startNewOpenSSHGroup()
+			case "p", "P":
+				return m, m.startNewPasswordGroup()
+			case "esc":
+				m.mode = modeTree
+				return m, nil
+			}
+			return m, nil
+
+		case modePasswordDetail:
+			switch msg.String() {
+			case "esc":
+				if m.editMode {
+					m.exitEditMode()
+					m.status = ""
+					return m, nil
+				}
+				m.pwSelIdx = -1
+				m.mode = modeTree
+				m.layoutDetailPanes()
+				return m, nil
+			case "w":
+				if err := m.saveOverlay(); err != nil {
+					m.status = errStyle.Render("Save overlay: " + err.Error())
+				} else {
+					m.status = "Password overlay saved."
+				}
+				return m, nil
+			case "s":
+				if m.overlayData != nil && m.pwSelIdx >= 0 {
+					return m.connectPasswordHost(m.pwSelIdx, modePasswordDetail)
+				}
+			case "e", "enter":
+				if it, ok := m.pwDetailList.SelectedItem().(pwFieldEntry); ok {
+					if m.editModeBlocked() {
+						return m, nil
+					}
+					m.returnAfterInput = modePasswordDetail
+					m.startPasswordFieldEdit(it)
+					return m, textinput.Blink
+				}
+			case "x", "X":
+				if m.editModeBlocked() {
+					return m, nil
+				}
+				if m.overlayData == nil || m.pwSelIdx < 0 || m.pwSelIdx >= len(m.overlayData.PasswordHosts) {
+					return m, nil
+				}
+				m.pendingDeletePwIdx = m.pwSelIdx
+				m.confirmReturnMode = modePasswordDetail
+				m.mode = modeConfirmDeleteHost
+				m.status = fmt.Sprintf("Delete password host %q? [y/N]", m.overlayData.PasswordHosts[m.pwSelIdx].Title())
+				return m, nil
+			}
+			var pwcmd tea.Cmd
+			m.pwDetailList, pwcmd = m.pwDetailList.Update(msg)
+			return m, pwcmd
+
 		case modeSSHConnectPending:
 			switch msg.String() {
 			case "esc":
@@ -1076,6 +1344,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "Y":
 				if m.readOnly {
 					m.status = errStyle.Render("Read-only.")
+					m.pendingDeletePwIdx = -1
 					m.mode = m.confirmReturnMode
 					if m.confirmReturnMode == modeDetail {
 						m.layoutDetailPanes()
@@ -1083,11 +1352,61 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else if m.confirmReturnMode == modeTree {
 						m.layoutDetailPanes()
 						m.refreshDetailList()
+					} else if m.confirmReturnMode == modePasswordDetail {
+						m.layoutDetailPanes()
+						m.refreshPasswordDetailList()
 					}
 					return m, nil
 				}
+				if m.pendingDeletePwIdx >= 0 {
+					if m.editModeBlocked() {
+						m.pendingDeletePwIdx = -1
+						return m, nil
+					}
+					if m.overlayData == nil || m.pendingDeletePwIdx >= len(m.overlayData.PasswordHosts) {
+						m.status = errStyle.Render("Invalid password host selection.")
+						m.pendingDeletePwIdx = -1
+						m.mode = m.confirmReturnMode
+						return m, nil
+					}
+					idx := m.pendingDeletePwIdx
+					m.overlayData.PasswordHosts = append(m.overlayData.PasswordHosts[:idx], m.overlayData.PasswordHosts[idx+1:]...)
+					m.pendingDeletePwIdx = -1
+					if err := m.saveOverlay(); err != nil {
+						m.status = errStyle.Render("Save overlay: " + err.Error())
+						m.mode = m.confirmReturnMode
+						return m, nil
+					}
+					ret := m.confirmReturnMode
+					m.mode = ret
+					m.layoutDetailPanes()
+					rb := m.rebuildHostList()
+					if ret == modePasswordDetail {
+						if len(m.overlayData.PasswordHosts) == 0 {
+							m.pwSelIdx = -1
+							m.mode = modeTree
+							m.refreshPasswordDetailList()
+						} else {
+							if m.pwSelIdx > idx {
+								m.pwSelIdx--
+							}
+							if m.pwSelIdx >= len(m.overlayData.PasswordHosts) {
+								m.pwSelIdx = len(m.overlayData.PasswordHosts) - 1
+							}
+							m.refreshPasswordDetailList()
+						}
+					} else {
+						m.pwSelIdx = -1
+						m.syncBrowsePreview()
+						m.refreshDetailList()
+						m.refreshPasswordDetailList()
+					}
+					m.status = "Password host removed."
+					return m, rb
+				}
 				m.cfg.DeleteHost(m.selRef)
 				m.dirty = true
+				m.pendingDeletePwIdx = -1
 				m.mode = modeTree
 				m.layoutDetailPanes()
 				rb := m.rebuildHostList()
@@ -1097,6 +1416,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, rb
 			case "n", "N", "esc":
 				m.status = ""
+				m.pendingDeletePwIdx = -1
 				m.mode = m.confirmReturnMode
 				if m.confirmReturnMode == modeDetail {
 					m.layoutDetailPanes()
@@ -1104,6 +1424,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.confirmReturnMode == modeTree {
 					m.layoutDetailPanes()
 					m.refreshDetailList()
+				} else if m.confirmReturnMode == modePasswordDetail {
+					m.layoutDetailPanes()
+					m.refreshPasswordDetailList()
 				}
 			}
 			return m, nil
@@ -1114,9 +1437,40 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.readOnly {
 					m.status = errStyle.Render("Read-only.")
 					m.pendingDeleteGroupName = ""
+					m.pendingDeleteOverlayGroup = false
 					m.mode = modeTree
 					m.layoutDetailPanes()
 					return m, nil
+				}
+				if m.pendingDeleteOverlayGroup {
+					if m.editModeBlocked() {
+						m.pendingDeleteGroupName = ""
+						m.pendingDeleteOverlayGroup = false
+						return m, nil
+					}
+					if m.overlayData == nil {
+						m.status = errStyle.Render("No password overlay.")
+						m.pendingDeleteGroupName = ""
+						m.pendingDeleteOverlayGroup = false
+						m.mode = modeTree
+						return m, nil
+					}
+					name := m.pendingDeleteGroupName
+					if err := m.overlayData.DeletePasswordGroup(name); err != nil {
+						m.status = errStyle.Render(err.Error())
+					} else if err := m.saveOverlay(); err != nil {
+						m.status = errStyle.Render("Save overlay: " + err.Error())
+					} else {
+						m.status = fmt.Sprintf("Password group %q removed (hosts ungrouped).", name)
+					}
+					m.pendingDeleteGroupName = ""
+					m.pendingDeleteOverlayGroup = false
+					m.mode = modeTree
+					m.layoutDetailPanes()
+					rb := m.rebuildHostList()
+					m.refreshDetailList()
+					m.refreshPasswordDetailList()
+					return m, rb
 				}
 				gi := -1
 				for i := range m.cfg.Groups {
@@ -1142,14 +1496,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.pendingDeleteGroupName = ""
+				m.pendingDeleteOverlayGroup = false
 				m.mode = modeTree
 				m.layoutDetailPanes()
 				rb := m.rebuildHostList()
 				m.refreshDetailList()
+				m.refreshPasswordDetailList()
 				return m, rb
 			case "n", "N", "esc":
 				m.status = ""
 				m.pendingDeleteGroupName = ""
+				m.pendingDeleteOverlayGroup = false
 				m.mode = modeTree
 				m.layoutDetailPanes()
 			}
@@ -1161,18 +1518,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeActionMenu:
 			return m.updateActionMenu(msg)
 
-		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputDuplicateHost,
-			modeInputNewGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta:
+		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputNewPasswordHost, modeInputDuplicateHost,
+			modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField:
 			switch msg.String() {
 			case "esc":
 				m.editDirectiveIndex = -1
 				m.pendingDirectiveKey = ""
 				m.editGroupIdx = -1
+				m.pwEditFieldKey = ""
 				m.mode = m.returnAfterInput
 				if m.returnAfterInput == modeDetail {
 					if m.cfg.ValidateRef(m.selRef) == nil {
 						m.refreshDetailList()
 					}
+				}
+				if m.returnAfterInput == modePasswordDetail {
+					m.refreshPasswordDetailList()
 				}
 				return m, nil
 			case "enter":
@@ -1277,6 +1638,33 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		m.status = "New host created."
 		return m, rb
 
+	case modeInputNewPasswordHost:
+		host := strings.TrimSpace(m.valueInput.Value())
+		if host == "" {
+			m.status = errStyle.Render("Enter the hostname or IP for ssh (patterns default to this; edit in detail).")
+			return m, nil
+		}
+		if m.overlayData == nil {
+			m.overlayData = &overlay.File{Version: 1}
+		}
+		pat := []string{host}
+		m.overlayData.PasswordHosts = append(m.overlayData.PasswordHosts, overlay.PasswordHost{
+			Group:    m.selectedPwGroup(),
+			Hostname: host,
+			Patterns: pat,
+		})
+		if err := m.saveOverlay(); err != nil {
+			m.status = errStyle.Render("Save overlay: " + err.Error())
+			m.mode = modeTree
+			return m, nil
+		}
+		newIdx := len(m.overlayData.PasswordHosts) - 1
+		rb := m.rebuildHostList()
+		m.openPasswordDetail(newIdx)
+		m.layoutDetailPanes()
+		m.status = "New password host created — e/enter to edit patterns, askpass, …"
+		return m, rb
+
 	case modeInputDuplicateHost:
 		pat := strings.Fields(m.valueInput.Value())
 		if len(pat) == 0 {
@@ -1312,6 +1700,87 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		rb := m.rebuildHostList()
 		m.refreshDetailList()
 		m.status = fmt.Sprintf("Created group %q.", name)
+		return m, rb
+
+	case modeInputNewPasswordGroup:
+		name := strings.TrimSpace(m.valueInput.Value())
+		if m.overlayData == nil {
+			m.overlayData = &overlay.File{Version: 1}
+		}
+		if err := m.overlayData.AddGroup(name); err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		if err := m.saveOverlay(); err != nil {
+			m.status = errStyle.Render("Save overlay: " + err.Error())
+			m.mode = modeTree
+			return m, nil
+		}
+		m.mode = modeTree
+		m.layoutDetailPanes()
+		rb := m.rebuildHostList()
+		m.status = fmt.Sprintf("Created password group %q.", name)
+		return m, rb
+
+	case modeInputPasswordField:
+		if m.overlayData == nil || m.pwSelIdx < 0 || m.pwSelIdx >= len(m.overlayData.PasswordHosts) {
+			m.status = errStyle.Render("No password host selected.")
+			m.mode = m.returnAfterInput
+			return m, nil
+		}
+		ph := &m.overlayData.PasswordHosts[m.pwSelIdx]
+		v := strings.TrimSpace(m.valueInput.Value())
+		switch m.pwEditFieldKey {
+		case "hostname":
+			if v == "" {
+				m.status = errStyle.Render("Hostname required.")
+				return m, nil
+			}
+			ph.Hostname = v
+		case "patterns":
+			pats := strings.Fields(m.valueInput.Value())
+			if len(pats) == 0 {
+				m.status = errStyle.Render("At least one pattern (space-separated).")
+				return m, nil
+			}
+			ph.Patterns = pats
+		case "user":
+			ph.User = v
+		case "port":
+			if v == "" {
+				ph.Port = 0
+			} else {
+				p, err := strconv.Atoi(v)
+				if err != nil || p < 0 || p > 65535 {
+					m.status = errStyle.Render("Invalid port (0–65535 or empty for 22).")
+					return m, nil
+				}
+				ph.Port = p
+			}
+		case "askpass":
+			ph.Askpass = strings.TrimSpace(m.valueInput.Value())
+		case "askpass_require":
+			ph.AskpassRequire = strings.TrimSpace(m.valueInput.Value())
+		case "display":
+			ph.Display = strings.TrimSpace(m.valueInput.Value())
+		case "group":
+			ph.Group = v
+		default:
+			m.status = errStyle.Render("Unknown field.")
+			m.mode = m.returnAfterInput
+			m.pwEditFieldKey = ""
+			return m, nil
+		}
+		if err := m.saveOverlay(); err != nil {
+			m.status = errStyle.Render("Save overlay: " + err.Error())
+			return m, nil
+		}
+		m.mode = m.returnAfterInput
+		m.pwEditFieldKey = ""
+		m.refreshPasswordDetailList()
+		m.layoutDetailPanes()
+		rb := m.rebuildHostList()
+		m.status = "Password host updated."
 		return m, rb
 
 	case modeInputRenameGroup:
@@ -1381,8 +1850,11 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if isEnterKey(msg) {
 			cmd := m.updateHostList(msg)
-			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
-				m.openDetail(row.ref)
+			switch it := m.hostList.SelectedItem().(type) {
+			case hostRowEntry:
+				m.openDetail(it.ref)
+			case passwordHostRowEntry:
+				m.openPasswordDetail(it.idx)
 			}
 			m.syncBrowsePreview()
 			return m, cmd
@@ -1403,6 +1875,15 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.syncBrowsePreview()
 			return m, rb
 		}
+
+	case msg.String() == "B":
+		return m, m.cycleBrowseMode()
+
+	case msg.String() == "I":
+		m.mode = modeExportWizard
+		m.wizardStep = 0
+		m.wizardPrepareStep()
+		return m, textinput.Blink
 
 	case msg.String() == "$":
 		return m, m.openAppConfigEditor()
@@ -1429,6 +1910,9 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.beginInteractiveSSH(modeTree, postWildConnectSSH)
 			}
 		}
+		if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
+			return m.connectPasswordHost(pw.idx, modeTree)
+		}
 
 	case msg.String() == "r":
 		return m, m.reloadFromDisk()
@@ -1445,18 +1929,21 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case msg.String() == "n":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
-		m.returnAfterInput = modeTree
-		m.mode = modeInputNewHost
-		m.valueInput.SetValue("")
-		m.valueInput.Placeholder = "Host patterns (space-separated)"
-		m.valueInput.Focus()
-		return m, textinput.Blink
+		switch m.browseMode {
+		case appcfg.BrowseModeOpenSSH:
+			return m, m.startNewOpenSSHHost()
+		case appcfg.BrowseModePassword:
+			return m, m.startNewPasswordHost()
+		default:
+			m.mode = modeNewHostTypePicker
+			return m, nil
+		}
 
 	case msg.String() == "v":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		return m, m.rawEditorCmd()
@@ -1466,22 +1953,37 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openDetail(it.ref)
 			return m, nil
 		}
+		if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
+			m.openPasswordDetail(pw.idx)
+			return m, nil
+		}
 		return m, nil
 
 	case msg.String() == "x":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			m.pendingDeletePwIdx = -1
 			m.selRef = row.ref
 			m.confirmReturnMode = modeTree
 			m.mode = modeConfirmDeleteHost
 			m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
 			return m, nil
 		}
+		if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
+			if m.overlayData == nil || pw.idx < 0 || pw.idx >= len(m.overlayData.PasswordHosts) {
+				return m, nil
+			}
+			m.pendingDeletePwIdx = pw.idx
+			m.confirmReturnMode = modeTree
+			m.mode = modeConfirmDeleteHost
+			m.status = fmt.Sprintf("Delete password host %q? [y/N]", m.overlayData.PasswordHosts[pw.idx].Title())
+			return m, nil
+		}
 
 	case msg.String() == "g":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
@@ -1493,18 +1995,21 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case msg.String() == "c":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
-		m.returnAfterInput = modeTree
-		m.mode = modeInputNewGroup
-		m.valueInput.SetValue("")
-		m.valueInput.Placeholder = "new group name (not (default))"
-		m.valueInput.Focus()
-		return m, textinput.Blink
+		switch m.browseMode {
+		case appcfg.BrowseModeOpenSSH:
+			return m, m.startNewOpenSSHGroup()
+		case appcfg.BrowseModePassword:
+			return m, m.startNewPasswordGroup()
+		default:
+			m.mode = modeNewGroupTypePicker
+			return m, nil
+		}
 
 	case msg.String() == "D":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
@@ -1512,9 +2017,30 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = errStyle.Render("(default) cannot be deleted.")
 				return m, nil
 			}
-			m.pendingDeleteGroupName = gh.label
+			if gh.label == "(password)" {
+				m.status = errStyle.Render("(password) section cannot be deleted here.")
+				return m, nil
+			}
+			var delName string
+			overlayGroup := false
+			switch {
+			case gh.groupIdx == -2 && gh.pwGroup != "":
+				overlayGroup = true
+				delName = gh.pwGroup
+			case gh.groupIdx >= 0 && gh.groupIdx < len(m.cfg.Groups):
+				delName = m.cfg.Groups[gh.groupIdx].Name
+			default:
+				m.status = errStyle.Render("Cannot delete this group header.")
+				return m, nil
+			}
+			m.pendingDeleteOverlayGroup = overlayGroup
+			m.pendingDeleteGroupName = delName
 			m.mode = modeConfirmDeleteGroup
-			m.status = fmt.Sprintf("Delete group %q and move its hosts to (default)? [y/N]", gh.label)
+			if overlayGroup {
+				m.status = fmt.Sprintf("Delete password group %q (hosts become ungrouped)? [y/N]", delName)
+			} else {
+				m.status = fmt.Sprintf("Delete group %q and move its hosts to (default)? [y/N]", delName)
+			}
 			return m, nil
 		}
 	}
@@ -1538,20 +2064,26 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.treePaneFocused {
 		if m.hostList.SettingFilter() {
 			if tryFilterListArrowNav(&m.hostList, msg) {
-				if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
-					m.selRef = row.ref
+				switch it := m.hostList.SelectedItem().(type) {
+				case hostRowEntry:
+					m.selRef = it.ref
 					m.refreshDetailList()
+				case passwordHostRowEntry:
+					m.pwSelIdx = it.idx
 				}
 				return m, nil
 			}
 			if isEnterKey(msg) {
 				cmd := m.updateHostList(msg)
-				if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
-					m.selRef = row.ref
+				switch it := m.hostList.SelectedItem().(type) {
+				case hostRowEntry:
+					m.selRef = it.ref
 					m.detailTab = detailTabAll
 					m.treePaneFocused = false
 					m.refreshDetailList()
 					m.layoutDetailPanes()
+				case passwordHostRowEntry:
+					m.openPasswordDetail(it.idx)
 				}
 				return m, cmd
 			}
@@ -1582,17 +2114,23 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
 				}
 			}
+			if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
+				return m.connectPasswordHost(pw.idx, modeDetail)
+			}
 		case msg.String() == "$":
 			return m, m.openAppConfigEditor()
 		case msg.String() == "&":
 			return m.openAppConfigView(modeDetail)
 		case msg.String() == "enter":
-			if it, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			switch it := m.hostList.SelectedItem().(type) {
+			case hostRowEntry:
 				m.selRef = it.ref
 				m.detailTab = detailTabAll
 				m.treePaneFocused = false
 				m.refreshDetailList()
 				m.layoutDetailPanes()
+			case passwordHostRowEntry:
+				m.openPasswordDetail(it.idx)
 			}
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
@@ -1601,6 +2139,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.rebuildHostList()
 		}
 		cmd := m.updateHostList(msg)
+		m.syncBrowsePreview()
 		return m, cmd
 	}
 
@@ -1619,6 +2158,11 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.layoutDetailPanes()
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		if m.editMode {
+			m.exitEditMode()
+			m.status = ""
+			return m, nil
+		}
 		m.mode = modeTree
 		m.layoutDetailPanes()
 		return m, m.rebuildHostList()
@@ -1643,7 +2187,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.actionMenuList.SetHeight(actionMenuListHeight(m.height))
 		return m, nil
 	case msg.String() == "i":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1663,7 +2207,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case msg.String() == "a":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1672,7 +2216,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pickerList.SetHeight(max(6, m.height-5))
 		return m, nil
 	case msg.String() == "k":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1683,7 +2227,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, textinput.Blink
 	case msg.String() == "e":
 		if it, ok := m.detailList.SelectedItem().(dirEntry); ok {
-			if m.readOnlyBlocked() {
+			if m.editModeBlocked() {
 				return m, nil
 			}
 			m.returnAfterInput = modeDetail
@@ -1697,7 +2241,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		}
 	case msg.String() == "d":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		if it, ok := m.detailList.SelectedItem().(dirEntry); ok {
@@ -1709,7 +2253,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case msg.String() == "D":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1719,20 +2263,21 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.valueInput.Focus()
 		return m, textinput.Blink
 	case msg.String() == "X":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
+		m.pendingDeletePwIdx = -1
 		m.confirmReturnMode = modeDetail
 		m.mode = modeConfirmDeleteHost
 		m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
 		return m, nil
 	case msg.String() == "v":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		return m, m.rawEditorCmd()
 	case msg.String() == "g":
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.openGroupPicker(modeDetail)
@@ -1744,7 +2289,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = errStyle.Render("Host is in (default); use g to move it to a named group.")
 			return m, nil
 		}
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1759,7 +2304,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = errStyle.Render("Host is in (default); no group description.")
 			return m, nil
 		}
-		if m.readOnlyBlocked() {
+		if m.editModeBlocked() {
 			return m, nil
 		}
 		m.returnAfterInput = modeDetail
@@ -1964,6 +2509,39 @@ func (m *Model) joinSplitPanes(leftBody, rightBody string, paneHeight int, right
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftBox, sep, rightBox)
 }
 
+const dragonBraille = "" +
+	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣠⣤⣤⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀\n" +
+	"⠀⠀⠀⠀⠀⠀⢀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⡀⠀⠀⠀⠀⠀⠀\n" +
+	"⠀⠀⠀⠀⢀⣴⣿⣿⣿⡿⠟⠛⠉⠉⠛⠻⣿⣿⣿⣷⣄⠀⠀⠀⠀⠀\n" +
+	"⠀⠀⠀⣴⣿⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣦⠀⠀⠀⠀\n" +
+	"⠀⠀⣼⣿⣿⡿⠁⠀⠀⣰⣿⣿⣿⣷⡀⠀⠀⠀⠈⢿⣿⣿⣧⠀⠀⠀\n" +
+	"⠀⢸⣿⣿⡿⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⢿⣿⣿⡇⠀⠀\n" +
+	"⠀⣿⣿⣿⠁⠀⠀⠀⠀⠘⠿⣿⣿⠿⠃⠀⠀⣀⡀⠀⠈⣿⣿⣿⠀⠀\n" +
+	"⢸⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⡇⠀⠀⢸⣿⣿⡇⠀\n" +
+	"⢸⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠟⠁⠀⠀⢸⣿⣿⡇⠀\n" +
+	"⠀⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⣿⣿⠀⠀\n" +
+	"⠀⠸⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⠇⠀⠀\n" +
+	"⠀⠀⠹⣿⣿⣷⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣾⣿⣿⠏⠀⠀⠀\n" +
+	"⠀⠀⠀⠙⢿⣿⣿⣦⡀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣿⡿⠃⠀⠀⠀⠀\n" +
+	"⠀⠀⠀⠀⠀⠙⠻⣿⣿⣶⣤⣀⣀⣀⣤⣶⣿⣿⠟⠋⠀⠀⠀⠀⠀⠀\n" +
+	"⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠻⠿⠿⠿⠟⠛⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀"
+
+func (m *Model) logoLine() string {
+	ver := m.version
+	if ver != "" {
+		ver = " v" + ver
+	}
+	return fmt.Sprintf("🐉 sshui%s", ver)
+}
+
+func (m *Model) logoBanner() string {
+	ver := m.version
+	if ver != "" {
+		ver = " v" + ver
+	}
+	return dragonBraille + "\n" + titleStyle.Render("sshui"+ver)
+}
+
 func (m *Model) writeStatusFooter(b *strings.Builder, statusLine string) {
 	b.WriteString(footerRuleStyle.Render(strings.Repeat("─", max(1, m.width))))
 	b.WriteByte('\n')
@@ -2008,7 +2586,7 @@ func (m Model) View() string {
 			titleSt = titleSt.Copy().Background(paneFill)
 			hintSt = hintSt.Copy().Background(paneFill)
 		}
-		title := titleSt.Render("sshui — help")
+		title := titleSt.Render(m.logoLine() + " — help")
 		hint := hintSt.Render("Esc — close help (only Esc exits) · ↑↓ PgUp/PgDn Space scroll")
 		body := m.helpViewport.View()
 		box := lipgloss.JoinVertical(lipgloss.Left, title, "", body, "", hint)
@@ -2026,6 +2604,23 @@ func (m Model) View() string {
 	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
 		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(m.status)
 		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
+		return b.String()
+
+	case modeExportWizard:
+		b.WriteString(m.wizardView())
+		return b.String()
+
+	case modePasswordDetail, modePasswordDetailEdit:
+		ph := max(5, m.height-5)
+		left := lipgloss.JoinVertical(lipgloss.Left, m.hostList.View())
+		right := m.pwDetailList.View()
+		b.WriteString(m.joinSplitPanes(left, right, ph, true))
+		b.WriteByte('\n')
+		editHint := m.editModeSuffix()
+		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
+			"e/enter edit · w save overlay · s ssh · x delete host · esc back%s%s",
+			editHint, m.browseModeSuffix(),
+		)))
 		return b.String()
 
 	case modeSSHConnectPending:
@@ -2067,6 +2662,24 @@ func (m Model) View() string {
 		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
 		return b.String()
 
+	case modeNewHostTypePicker:
+		body := titleStyle.Render("New host — choose type") + "\n\n"
+		body += statusStyle.Render("  o — OpenSSH host  (default)") + "\n"
+		body += statusStyle.Render("  p — Password host (overlay)") + "\n\n"
+		body += statusStyle.Render("  Esc — cancel")
+		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(44, m.width-4)).Render(body)
+		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
+		return b.String()
+
+	case modeNewGroupTypePicker:
+		body := titleStyle.Render("New group — choose type") + "\n\n"
+		body += statusStyle.Render("  o — OpenSSH group  (default)") + "\n"
+		body += statusStyle.Render("  p — Password group (overlay)") + "\n\n"
+		body += statusStyle.Render("  Esc — cancel")
+		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(44, m.width-4)).Render(body)
+		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
+		return b.String()
+
 	case modeActionMenu:
 		menu := m.renderActionMenuBox()
 		headerLines := strings.Count(b.String(), "\n") + 1
@@ -2078,7 +2691,7 @@ func (m Model) View() string {
 		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Center, menu, placeOpts...))
 		return b.String()
 
-	case modeInputDirectiveValue, modeInputNewHost, modeInputDuplicateHost, modeInputNewGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta:
+	case modeInputDirectiveValue, modeInputNewHost, modeInputNewPasswordHost, modeInputDuplicateHost, modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField:
 		switch m.mode {
 		case modeInputNewGroup:
 			b.WriteString(statusStyle.Render("New group name, Esc cancel"))
@@ -2088,6 +2701,12 @@ func (m Model) View() string {
 			b.WriteString(statusStyle.Render("Group #@desc line (empty clears), Esc cancel"))
 		case modeInputHostMeta:
 			b.WriteString(statusStyle.Render("Host #@host lines, Esc cancel"))
+		case modeInputNewPasswordHost:
+			b.WriteString(statusStyle.Render("New password host: hostname or IP first (patterns default to this) · Esc cancel"))
+		case modeInputNewPasswordGroup:
+			b.WriteString(statusStyle.Render("New password group name, Esc cancel"))
+		case modeInputPasswordField:
+			b.WriteString(statusStyle.Render("Edit field · Enter save · Esc cancel"))
 		default:
 			b.WriteString(statusStyle.Render("Enter value, Esc cancel"))
 		}
@@ -2125,8 +2744,8 @@ func (m Model) View() string {
 			focus = "tree"
 		}
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"focus %s | tab | t tabs | W Include | i meta | A actions | s ssh | a k add | e d D g m o X | v w | $ cfg | & view cfg | z fold | esc tree",
-			focus,
+			"focus %s | tab | t tabs | W Include | i meta | A actions | s ssh | a k add | e d D g m o X | v w | $ cfg | & view cfg | z fold | esc tree%s%s",
+			focus, m.editModeSuffix(), m.browseModeSuffix(),
 		)))
 		return b.String()
 
@@ -2150,7 +2769,9 @@ func (m Model) View() string {
 		ph := max(5, m.height-5)
 		left := m.hostList.View()
 		var right string
-		if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
+		if _, onPw := m.hostList.SelectedItem().(passwordHostRowEntry); onPw {
+			right = m.pwDetailList.View()
+		} else if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
 			right = m.detailList.View()
 		} else {
 			right = paneRightStyle.Copy().
@@ -2160,70 +2781,514 @@ func (m Model) View() string {
 		}
 		b.WriteString(m.joinSplitPanes(left, right, ph, false))
 		b.WriteByte('\n')
-		m.writeStatusFooter(&b, statusStyle.Render(
-			"enter editor | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | v raw | $ app cfg | & view cfg | / filter | w r ? q",
-		))
+		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
+			"enter editor | B browse | I setup | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | v raw | $ cfg | / filter | w r ? q%s%s",
+			m.editModeSuffix(), m.browseModeSuffix(),
+		)))
 		return b.String()
 	}
 }
 
+// --- Password host detail ---
+
+func (m *Model) startNewOpenSSHHost() tea.Cmd {
+	m.returnAfterInput = modeTree
+	m.mode = modeInputNewHost
+	m.valueInput.SetValue("")
+	m.valueInput.Placeholder = "Host patterns (space-separated)"
+	m.valueInput.Focus()
+	return textinput.Blink
+}
+
+func (m *Model) startNewPasswordHost() tea.Cmd {
+	m.returnAfterInput = modeTree
+	m.mode = modeInputNewPasswordHost
+	m.valueInput.SetValue("")
+	hint := "Hostname or IP (ssh connects here; patterns default to this)"
+	if g := m.selectedPwGroup(); g != "" {
+		hint = fmt.Sprintf("Hostname — group %q · patterns default to hostname", g)
+	}
+	m.valueInput.Placeholder = hint
+	m.valueInput.Width = min(60, max(40, m.width-8))
+	m.valueInput.Focus()
+	return textinput.Blink
+}
+
+// selectedPwGroup returns the password group name for the currently selected
+// password group header, or "" if not on one.
+func (m *Model) selectedPwGroup() string {
+	if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok && gh.groupIdx == -2 {
+		return gh.pwGroup
+	}
+	if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
+		if m.overlayData != nil && pw.idx >= 0 && pw.idx < len(m.overlayData.PasswordHosts) {
+			return m.overlayData.PasswordHosts[pw.idx].Group
+		}
+	}
+	return ""
+}
+
+func (m *Model) openPasswordDetail(idx int) {
+	if m.overlayData == nil || idx < 0 || idx >= len(m.overlayData.PasswordHosts) {
+		return
+	}
+	m.pwSelIdx = idx
+	m.refreshPasswordDetailList()
+	m.mode = modePasswordDetail
+}
+
+func (m *Model) connectPasswordHost(idx int, returnMode viewMode) (*Model, tea.Cmd) {
+	if m.overlayData == nil || idx < 0 || idx >= len(m.overlayData.PasswordHosts) {
+		return m, nil
+	}
+	ph := &m.overlayData.PasswordHosts[idx]
+	target := ph.Hostname
+	if target == "" {
+		target = ph.Title()
+	}
+	m.sshConnectReturnMode = returnMode
+	m.sshConnectPendingCancelled = false
+	m.sshConnectPendingAlias = target
+	m.sshConnectPendingNote = ""
+	m.sshConnectPendingSFTP = false
+	m.mode = modeSSHConnectPending
+	return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return sshConnectReadyMsg{} })
+}
+
+func buildPasswordSSHArgs(ph *overlay.PasswordHost) []string {
+	var args []string
+	if ph.Port > 0 && ph.Port != 22 {
+		args = append(args, "-p", fmt.Sprintf("%d", ph.Port))
+	}
+	target := ph.Hostname
+	if ph.User != "" {
+		target = ph.User + "@" + target
+	}
+	args = append(args, target)
+	return args
+}
+
+func (m *Model) refreshPasswordDetailList() {
+	rw := m.rightPaneWidth()
+	rh := max(5, m.height-5)
+	if m.mode == modePasswordDetail || m.mode == modePasswordDetailEdit {
+		rw = m.rightPaneWidth()
+		rh = max(5, m.height-5)
+	}
+	delegate := newDetailListDelegate()
+	m.applyDetailListDelegateBG(&delegate)
+	var items []list.Item
+	title := "Password host"
+	if m.overlayData != nil && m.pwSelIdx >= 0 && m.pwSelIdx < len(m.overlayData.PasswordHosts) {
+		ph := &m.overlayData.PasswordHosts[m.pwSelIdx]
+		title = "Password: " + ph.Title()
+		portDesc := "(default 22)"
+		if ph.Port > 0 {
+			portDesc = fmt.Sprintf("%d", ph.Port)
+		}
+		items = append(items, pwFieldEntry{key: "hostname", field: "hostname", val: ph.Hostname})
+		items = append(items, pwFieldEntry{key: "patterns", field: "patterns", val: ph.PatternsString()})
+		items = append(items, pwFieldEntry{key: "user", field: "user", val: ph.User})
+		items = append(items, pwFieldEntry{key: "port", field: "port", val: portDesc})
+		items = append(items, pwFieldEntry{key: "askpass", field: "askpass", val: ph.Askpass})
+		items = append(items, pwFieldEntry{key: "askpass_require", field: "askpass_require", val: ph.AskpassRequire})
+		items = append(items, pwFieldEntry{key: "display", field: "display", val: ph.Display})
+		items = append(items, pwFieldEntry{key: "group", field: "group", val: ph.Group})
+	} else {
+		title = "Password host — select a row"
+	}
+	l := list.New(items, delegate, rw, rh)
+	l.Title = title
+	l.Styles.Title = titleStyle
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(false)
+	l.DisableQuitKeybindings()
+	applyPaneChromeToList(&l)
+	m.pwDetailList = l
+}
+
+func (m *Model) startPasswordFieldEdit(it pwFieldEntry) {
+	ph := &m.overlayData.PasswordHosts[m.pwSelIdx]
+	m.mode = modeInputPasswordField
+	m.pwEditFieldKey = it.field
+	m.valueInput.SetValue("")
+	m.valueInput.Placeholder = ""
+	switch it.field {
+	case "hostname":
+		m.valueInput.SetValue(ph.Hostname)
+		m.valueInput.Placeholder = "hostname or IP for ssh"
+	case "patterns":
+		m.valueInput.SetValue(ph.PatternsString())
+		m.valueInput.Placeholder = "space-separated Host patterns (ssh aliases)"
+	case "user":
+		m.valueInput.SetValue(ph.User)
+		m.valueInput.Placeholder = "ssh user (optional)"
+	case "port":
+		if ph.Port > 0 {
+			m.valueInput.SetValue(fmt.Sprintf("%d", ph.Port))
+		}
+		m.valueInput.Placeholder = "port (empty = 22)"
+	case "askpass":
+		m.valueInput.SetValue(ph.Askpass)
+		m.valueInput.Placeholder = "path to SSH_ASKPASS script"
+	case "askpass_require":
+		m.valueInput.SetValue(ph.AskpassRequire)
+		m.valueInput.Placeholder = "e.g. force (optional)"
+	case "display":
+		m.valueInput.SetValue(ph.Display)
+		m.valueInput.Placeholder = "DISPLAY for askpass (optional)"
+	case "group":
+		m.valueInput.SetValue(ph.Group)
+		m.valueInput.Placeholder = "overlay group name (optional)"
+	}
+	m.valueInput.Width = min(64, max(36, m.width-8))
+	m.valueInput.Focus()
+}
+
+func (m *Model) saveOverlay() error {
+	if m.overlayData == nil || m.overlayPath == "" {
+		return fmt.Errorf("no overlay configured")
+	}
+	return overlay.Save(m.overlayPath, m.overlayData)
+}
+
+// --- Setup wizard ---
+//
+// Steps:  0 — SSH config path  (main ~/.ssh/config)
+//         1 — SSH hosts path   (sshui-managed file)
+//         2 — Overlay path     (password_hosts.toml)
+//         3 — Copy question    (y / n / q)
+
+var wizardLabels = [3]string{
+	"Main SSH config",
+	"sshui SSH hosts file",
+	"Password overlay",
+}
+
+func (m *Model) wizardPrepareStep() {
+	if m.wizardStep >= 3 {
+		return
+	}
+	var val string
+	switch m.wizardStep {
+	case 0:
+		val = m.mainSSHConfigPath
+	case 1:
+		val = m.sshHostsPath
+	case 2:
+		val = m.overlayPath
+	}
+	m.valueInput.SetValue(val)
+	m.valueInput.CursorEnd()
+	m.valueInput.Focus()
+	m.valueInput.Placeholder = ""
+	m.valueInput.Width = min(58, m.width-12)
+}
+
+func (m *Model) wizardView() string {
+	title := m.logoBanner() + " — Setup"
+
+	var lines []string
+	lines = append(lines, "")
+	lines = append(lines, statusStyle.Render(fmt.Sprintf("Config will be saved to: %s", m.appConfigPath)))
+	lines = append(lines, "")
+
+	for i := 0; i < 3; i++ {
+		var val string
+		switch i {
+		case 0:
+			val = m.mainSSHConfigPath
+		case 1:
+			val = m.sshHostsPath
+		case 2:
+			val = m.overlayPath
+		}
+
+		prefix := "  "
+		if i == m.wizardStep {
+			prefix = "> "
+		}
+		label := fmt.Sprintf("%s%d. %s", prefix, i+1, wizardLabels[i])
+
+		if i < m.wizardStep {
+			lines = append(lines, statusStyle.Render(fmt.Sprintf("%s: %s", label, val)))
+		} else if i == m.wizardStep {
+			lines = append(lines, fmt.Sprintf("%s:", label))
+			lines = append(lines, "     "+m.valueInput.View())
+		} else {
+			lines = append(lines, statusStyle.Render(fmt.Sprintf("%s: %s", label, val)))
+		}
+	}
+
+	lines = append(lines, "")
+
+	copyLabel := "  4. Move hosts from main SSH config?"
+	if m.wizardStep < 3 {
+		lines = append(lines, statusStyle.Render(copyLabel))
+	} else {
+		lines = append(lines, fmt.Sprintf("> 4. Move hosts from main SSH config?"))
+		lines = append(lines, "")
+		lines = append(lines, statusStyle.Render("     y — Yes, move hosts and add Include"))
+		lines = append(lines, statusStyle.Render("     n — No, just add Include"))
+		lines = append(lines, statusStyle.Render("     q — Quit"))
+	}
+
+	lines = append(lines, "")
+	if m.wizardStep < 3 {
+		lines = append(lines, statusStyle.Render("Enter to confirm  •  Esc to go back"))
+	}
+
+	body := title + "\n" + strings.Join(lines, "\n")
+	boxW := min(70, m.width-4)
+	box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(boxW).Render(body)
+
+	placeH := max(1, m.height-2)
+	return lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m *Model) handleExportWizard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wizardStep == 3 {
+		switch msg.String() {
+		case "y", "Y":
+			return m.wizardFinish(true)
+		case "n", "N":
+			return m.wizardFinish(false)
+		case "q", "Q":
+			return m, tea.Quit
+		case "esc":
+			m.wizardStep = 2
+			m.wizardPrepareStep()
+			return m, textinput.Blink
+		}
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "enter":
+		val := strings.TrimSpace(m.valueInput.Value())
+		if val == "" {
+			return m, nil
+		}
+		expanded, err := appcfg.ExpandPath(val)
+		if err != nil {
+			m.status = errStyle.Render("Invalid path: " + err.Error())
+			return m, nil
+		}
+		switch m.wizardStep {
+		case 0:
+			m.mainSSHConfigPath = expanded
+		case 1:
+			m.sshHostsPath = expanded
+			m.path = expanded
+		case 2:
+			m.overlayPath = expanded
+		}
+		m.wizardStep++
+		if m.wizardStep < 3 {
+			m.wizardPrepareStep()
+			return m, textinput.Blink
+		}
+		m.valueInput.Blur()
+		return m, nil
+
+	case "esc":
+		if m.wizardStep == 0 {
+			return m, tea.Quit
+		}
+		m.wizardStep--
+		m.wizardPrepareStep()
+		return m, textinput.Blink
+	}
+
+	var cmd tea.Cmd
+	m.valueInput, cmd = m.valueInput.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) wizardFinish(copyHosts bool) (tea.Model, tea.Cmd) {
+	if err := scfg.EnsureSSHHostsFile(m.sshHostsPath); err != nil {
+		m.status = errStyle.Render("Create ssh_hosts: " + err.Error())
+		m.mode = modeTree
+		return m, nil
+	}
+
+	if copyHosts {
+		data := m.readMainConfig()
+		if data != "" {
+			mainCfg, err := scfg.Parse(strings.NewReader(data))
+			if err != nil {
+				m.status = errStyle.Render("Parse main config: " + err.Error())
+			} else if err := scfg.ExportHostsTo(mainCfg, m.sshHostsPath); err != nil {
+				m.status = errStyle.Render("Export hosts: " + err.Error())
+			} else if err := scfg.StripHostBlocks(m.mainSSHConfigPath); err != nil {
+				m.status = errStyle.Render("Strip hosts: " + err.Error())
+			} else {
+				m.status = "Hosts moved from " + m.mainSSHConfigPath
+			}
+		}
+	}
+
+	if err := scfg.AppendInclude(m.mainSSHConfigPath, m.sshHostsPath); err != nil {
+		if m.status == "" {
+			m.status = errStyle.Render("Include: " + err.Error())
+		}
+	}
+
+	// Persist wizard choices into config.toml with sensible defaults.
+	if m.appConfig != nil {
+		m.appConfig.SSHConfig = m.mainSSHConfigPath
+		m.appConfig.Hosts.SSHHostsPath = m.sshHostsPath
+		m.appConfig.Hosts.PasswordOverlay = m.overlayPath
+
+		if m.appConfig.Editor == "" {
+			m.appConfig.Editor = wizardDefaultEditor()
+		}
+		if m.appConfig.Theme == "" {
+			m.appConfig.Theme = "default"
+		}
+		if m.appConfig.Hosts.BrowseMode == "" {
+			m.appConfig.Hosts.BrowseMode = appcfg.BrowseModeMerged
+		}
+
+		m.editor = m.appConfig.Editor
+		m.themeName = m.appConfig.Theme
+		m.browseMode = m.appConfig.Hosts.BrowseMode
+
+		if err := appcfg.Save(m.appConfig); err != nil {
+			if m.status == "" {
+				m.status = errStyle.Render("Save config: " + err.Error())
+			}
+		}
+	}
+
+	if m.status == "" {
+		if copyHosts {
+			m.status = "Setup complete — hosts moved, Include added."
+		} else {
+			m.status = "Setup complete — Include added."
+		}
+	}
+
+	m.exportWizardNeeded = false
+	m.mode = modeTree
+	return m, m.reloadFromDisk()
+}
+
+func (m *Model) readMainConfig() string {
+	path := m.mainSSHConfigPath
+	if path == "" {
+		path = m.path
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func wizardDefaultEditor() string {
+	if v := os.Getenv("VISUAL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("EDITOR"); v != "" {
+		return v
+	}
+	return "vi"
+}
+
+// browseModeSuffix returns a short string for the footer to indicate the current browse mode.
+func (m *Model) browseModeSuffix() string {
+	switch m.browseMode {
+	case appcfg.BrowseModeOpenSSH:
+		return " [openssh]"
+	case appcfg.BrowseModePassword:
+		return " [password]"
+	default:
+		return ""
+	}
+}
+
+// editModeSuffix returns a short footer string for the edit mode.
+func (m *Model) editModeSuffix() string {
+	if m.editMode {
+		return " [editing]"
+	}
+	return " [read-only]"
+}
+
 const helpText = `
-sshui — SSH client config TUI
+sshui - SSH client config TUI
 
 Browse (split view)
-  Left: Host patterns only, grouped under (default) and #@group sections
-  Right: directive preview for the selected host row
-  enter     Open full editor (tabs, add/remove directives, …)
-  /         Filter host list; ↑↓ or k/j move among matches (left pane shows selection); Enter applies filter and opens host detail (or focuses the right pane if already in detail)
-  z         Collapse/expand group (when a group header row is selected)
-  A         Actions: ssh / sftp / copy (same rules as s: first pattern, wildcard prompt if needed, short gate)
-  n         New host under (default)
-  c         Create new empty group (also shown in the host list title)
+  enter     Open full editor or password host detail
+  /         Filter host list
+  z         Collapse/expand group
+  B         Cycle browse mode: merged > openssh > password (persisted)
+  A         Actions: ssh / sftp / copy
+  n         New host (OpenSSH or password, depends on browse mode)
+  c         Create new empty group (enters edit mode)
   D         Delete group (when a group header row is selected)
   x         Delete host (confirm)
   g         Move selected host to group / (default)
-  v         Raw $EDITOR buffer (SSH config buffer, not sshui settings)
-  $         Open sshui app config (~/.config/sshui/config.toml) in $EDITOR
-  &         View sshui app config in a read-only scrollable pane (esc/q close)
-  s         SSH: first Host pattern (warns if the stanza lists several). Wildcards → complete hostname (Esc aborts, Enter continues), then short “Connecting…” (Esc cancels ssh)
+  v         Raw $EDITOR buffer
+  $ / &     Edit / view sshui app config
+  s         SSH connect (password hosts use SSH_ASKPASS overlay)
   w / r     Write (save) / reload
-  W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
-  ?         Open this help (scroll with arrows / PgUp / PgDn / Space; Esc closes help only)
-  q         Quit (from browse)
+  W         Toggle Include view: merged read-only / editable main file only
+  I         Re-run setup wizard (move hosts, Include, config.toml)
+  ?         Open this help
+  q         Quit
+
+Edit mode
+  sshui starts in read-only mode. Mutating actions enter edit mode and acquire a
+  lock (.sshui.swp) to prevent concurrent modifications. Esc on host detail exits
+  edit mode first, then exits the detail view. Footer shows [read-only] or [editing].
+
+Browse modes (B key)
+  merged    OpenSSH hosts + password overlay hosts in one tree (default)
+  openssh   Only hosts from the ssh_hosts file
+  password  Only password-overlay hosts from password_hosts.toml
+  Merged tree: same group name in both → one section with 🔀 after the name; password-only
+              groups show 🔤🔑 before the name (letters + key).
+
+Password hosts (overlay)
+  Password-authenticated hosts live in password_hosts.toml (TOML, not ssh_config).
+  New host (n): enter hostname or IP first (ssh target); patterns default to that string.
+  Browse: the right pane lists fields; press enter to open password detail, then e or enter
+  on a row to edit patterns, user, port, askpass, askpass_require, display, or group.
+  w saves the overlay; s runs ssh with SSH_ASKPASS env. See docs/ASKPASS.md for vault recipes.
+
+Password host detail
+  e / enter  Edit highlighted field · w save overlay · s ssh · esc back (exits edit mode first)
 
 Include / read-only (merged view)
-  If your config contains an Include directive, sshui may start in read-only merged mode: it loads
-  the main file you opened plus every file matched by Include and shows extra groups like
-  include:filename so you can browse all hosts in one place. Saving is disabled because one Save
-  could not safely rewrite every included file.
-
-  To edit your main config anyway: press W. You switch to a writable single-file view: only Host
-  blocks from that path are shown; write (w) still writes only that path. Included definitions are
-  hidden until you press W again (if you have no unsaved changes) or r (reload from disk), which
-  restores merged read-only browse if Include is still present.
+  If your config has Include, sshui may start in merged read-only mode. Press W to
+  switch to writable single-file view. r reloads from disk.
 
 Host detail (split: tree | detail)
   tab       Focus tree vs detail pane
-  t         Cycle tab: Overview → All directives → Connectivity
-  i         Edit #@host metadata lines (multiline)
+  t         Cycle tab: Overview > All > Connectivity
+  i         Edit #@host metadata lines
   A         Actions menu (ssh / sftp / copy)
-  s         Same SSH flow as browse s (first pattern, wildcard prompt if needed, short gate); Esc cancels where shown
-  a / k     Add directive (picker: / to filter, enter to add selected keyword / custom key)
+  s         SSH connect
+  a / k     Add directive (picker / custom key)
   e / d     Edit value / delete directive
   D         Duplicate host
   g         Move host to another group
   m / o     Rename group / edit #@desc
   X         Delete host (confirm)
   v / w     Raw editor / write (save)
-  $ / &     Edit / view sshui app config (same as browse mode)
-  z         Fold group on tree (when header selected)
-  esc       Back to tree
+  z         Fold group on tree
+  esc       Exit edit mode (if editing), then back to tree
 
-CLI: sshui list | sshui show HOST [--json] | sshui dump [--json] [--check] | sshui completion bash|zsh|fish
+Paths
+  ssh_hosts:         ~/.config/sshui/ssh_hosts (OpenSSH format, primary edit target)
+  password overlay:  ~/.config/sshui/password_hosts.toml
+  app config:        ~/.config/sshui/config.toml
+  main ssh_config:   ~/.ssh/config (Include ssh_hosts appended on first run)
 
-Optional: ~/.config/sshui/config.toml — ssh_config, editor, theme, ssh_config_git_mirror (copy-on-save path).
+CLI: sshui list | sshui show HOST [--json] | sshui dump [--json] [--check]
+     sshui completion bash|zsh|fish
 
-NO_COLOR=1 disables ANSI styling (pane backgrounds and list colors are subdued).
-
-Each save writes a hidden .bkp beside the config; optional mirror path gets the same bytes (0600).
+NO_COLOR=1 disables ANSI styling. Each save writes a hidden .bkp beside the config.
 `
