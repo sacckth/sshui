@@ -258,7 +258,7 @@ func buildHostItemsFiltered(cfg *scfg.Config, ov *overlay.File, browseMode strin
 	if showOpenSSH {
 		defLabel := "(default)"
 		if hasMainSection {
-			defLabel = "✏️  managed"
+			defLabel = "📝 managed"
 		}
 		defCollapsed := cfg.DefaultHostsCollapsed && !ignoreCollapse
 		items = append(items, groupHeaderEntry{

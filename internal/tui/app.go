@@ -3428,7 +3428,7 @@ Main ssh_config + managed ssh_hosts (dual tree)
   shows two sections separated by a blank line:
     🔒 unmanaged   Read-only hosts from the parent ssh_config (e.g. ~/.ssh/config).
                    Shown in a dimmer color. Groups keep their names with a 🔒 suffix.
-    ✏️  managed     Editable hosts in ssh_hosts (the primary edit target).
+    📝 managed      Editable hosts in ssh_hosts (the primary edit target).
   Hosts in the unmanaged section cannot be edited, deleted, or moved directly.
   To move a host into managed, select it, press A → Import. sshui copies the host
   into ssh_hosts and prompts to remove it from the main file (default: yes).

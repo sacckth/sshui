@@ -73,7 +73,7 @@ On first run, sshui creates a default `config.toml` and offers to import existin
 When `ssh_config` in `config.toml` points to a different file than `ssh_hosts_path` (the default setup), the TUI shows both:
 
 - **🔒 unmanaged** -- read-only hosts from your main `~/.ssh/config`, shown in a dimmer color. Groups defined with `#@group:` metadata are preserved (shown with a 🔒 suffix).
-- **✏️  managed** -- editable hosts in `ssh_hosts` (the primary edit target).
+- **📝 managed** -- editable hosts in `ssh_hosts` (the primary edit target).
 
 Hosts in the ssh_config section cannot be edited directly. To move a host into the managed file, select it, press `A` (Actions), then choose **Import**. sshui copies the host and prompts to remove it from the main file (default: yes).
 
