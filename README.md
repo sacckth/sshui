@@ -68,6 +68,15 @@ sshui uses three files, all optional and auto-created on first run:
 
 On first run, sshui creates a default `config.toml` and offers to import existing hosts from `~/.ssh/config`. An `Include` directive is automatically appended to your main ssh config so that `ssh <alias>` works from the shell without sshui.
 
+### Dual tree: main ssh_config + managed hosts
+
+When `ssh_config` in `config.toml` points to a different file than `ssh_hosts_path` (the default setup), the TUI shows both:
+
+- **🔒 unmanaged** -- read-only hosts from your main `~/.ssh/config`, shown in a dimmer color. Groups defined with `#@group:` metadata are preserved (shown with a 🔒 suffix).
+- **✏️  managed** -- editable hosts in `ssh_hosts` (the primary edit target).
+
+Hosts in the ssh_config section cannot be edited directly. To move a host into the managed file, select it, press `A` (Actions), then choose **Import**. sshui copies the host and prompts to remove it from the main file (default: yes).
+
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full settings reference and path resolution.
 
 ### Password hosts

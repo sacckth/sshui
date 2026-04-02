@@ -227,6 +227,55 @@ Include /etc/ssh/ssh_config.d/*
 	}
 }
 
+func TestStripBridgeIncludes(t *testing.T) {
+	dir := t.TempDir()
+	sshHosts := filepath.Join(dir, "ssh_hosts")
+	os.WriteFile(sshHosts, nil, 0o600)
+
+	cfg := &Config{
+		DefaultHosts: []HostBlock{
+			{Patterns: []string{"*"}, Directives: []Directive{{Key: "Include", Value: sshHosts}}},
+			{Patterns: []string{"prod"}, Directives: []Directive{{Key: "HostName", Value: "prod.example.com"}}},
+		},
+		Groups: []Group{
+			{Name: "work", Hosts: []HostBlock{
+				{Patterns: []string{"jump"}, Directives: []Directive{{Key: "HostName", Value: "jump.internal"}}},
+			}},
+		},
+	}
+	out := StripBridgeIncludes(cfg, sshHosts)
+	if len(out.DefaultHosts) != 1 {
+		t.Fatalf("expected 1 default host after strip, got %d", len(out.DefaultHosts))
+	}
+	if out.DefaultHosts[0].Patterns[0] != "prod" {
+		t.Fatalf("wrong host kept: %v", out.DefaultHosts[0].Patterns)
+	}
+	if len(out.Groups) != 1 || len(out.Groups[0].Hosts) != 1 {
+		t.Fatal("groups should be unchanged")
+	}
+}
+
+func TestStripBridgeIncludesKeepsNonBridge(t *testing.T) {
+	cfg := &Config{
+		DefaultHosts: []HostBlock{
+			{Patterns: []string{"*"}, Directives: []Directive{
+				{Key: "Include", Value: "/etc/ssh/ssh_config.d/*"},
+				{Key: "ServerAliveInterval", Value: "60"},
+			}},
+		},
+	}
+	out := StripBridgeIncludes(cfg, "/tmp/ssh_hosts")
+	if len(out.DefaultHosts) != 1 {
+		t.Fatal("host with mixed directives should be kept")
+	}
+}
+
+func TestStripBridgeIncludesNil(t *testing.T) {
+	if StripBridgeIncludes(nil, "/tmp/ssh_hosts") != nil {
+		t.Fatal("nil cfg should return nil")
+	}
+}
+
 func TestStripHostBlocksMissingFile(t *testing.T) {
 	err := StripHostBlocks(filepath.Join(t.TempDir(), "nope"))
 	if err != nil {

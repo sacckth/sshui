@@ -96,13 +96,21 @@ func appendPasswordUngroupedAndNamed(items []list.Item, ov *overlay.File, totalW
 	return items
 }
 
+// sectionSepEntry is a blank row used as visual spacing between tree sections.
+type sectionSepEntry struct{}
+
+func (e sectionSepEntry) Title() string       { return "" }
+func (e sectionSepEntry) Description() string { return "" }
+func (e sectionSepEntry) FilterValue() string { return "" }
+
 // groupHeaderEntry is a section label in the host tree (collapse/expand via z).
 type groupHeaderEntry struct {
 	label      string
 	collapsed  bool
 	defaultSec bool   // true for the (default) pseudo-group
-	groupIdx   int    // index into cfg.Groups when !defaultSec; -2 for password groups
+	groupIdx   int    // index into cfg.Groups when !defaultSec; -2 for password groups; -3 for unmanaged
 	pwGroup    string // non-empty for named password groups
+	unmanaged  bool   // true for read-only hosts from the parent ssh_config
 }
 
 func (e groupHeaderEntry) Title() string {
@@ -220,7 +228,8 @@ func groupDescEditPreview(lines []string) string {
 }
 
 // buildHostItemsFiltered builds tree rows filtered by browse mode.
-func buildHostItemsFiltered(cfg *scfg.Config, ov *overlay.File, browseMode string, totalWidth int, ignoreCollapse bool) []list.Item {
+// mainCfg, when non-nil, is displayed as a read-only section above the managed hosts.
+func buildHostItemsFiltered(cfg *scfg.Config, ov *overlay.File, browseMode string, totalWidth int, ignoreCollapse bool, mainCfg ...*scfg.Config) []list.Item {
 	if totalWidth < 12 {
 		totalWidth = 48
 	}
@@ -233,10 +242,27 @@ func buildHostItemsFiltered(cfg *scfg.Config, ov *overlay.File, browseMode strin
 
 	var emittedPw map[string]bool
 
+	// Resolve optional mainCfg from variadic param.
+	var mc *scfg.Config
+	if len(mainCfg) > 0 {
+		mc = mainCfg[0]
+	}
+	hasMainSection := mc != nil && showOpenSSH && (len(mc.DefaultHosts) > 0 || len(mc.Groups) > 0)
+
+	// --- Main ssh_config section (read-only) ---
+	if hasMainSection {
+		items = appendMainCfgSection(items, mc, totalWidth, ignoreCollapse)
+	}
+
+	// --- Managed ssh_hosts section ---
 	if showOpenSSH {
+		defLabel := "(default)"
+		if hasMainSection {
+			defLabel = "✏️  managed"
+		}
 		defCollapsed := cfg.DefaultHostsCollapsed && !ignoreCollapse
 		items = append(items, groupHeaderEntry{
-			label:      "(default)",
+			label:      defLabel,
 			collapsed:  defCollapsed,
 			defaultSec: true,
 			groupIdx:   -1,
@@ -380,7 +406,8 @@ func (h hostTreeDelegate) Spacing() int { return h.inner.Spacing() }
 func (h hostTreeDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return h.inner.Update(msg, m) }
 
 // renderHostTreeRow draws host rows with selection visible during filter editing (unlike bubbles DefaultDelegate).
-func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s *list.DefaultItemStyles) {
+// When fromMain is true, unmanaged styles are used instead of the delegate defaults.
+func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s *list.DefaultItemStyles, fromMain bool) {
 	title := row.Title()
 	if m.Width() <= 0 {
 		return
@@ -393,6 +420,13 @@ func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s
 	}
 	title = ansi.Truncate(title, textwidth, listEllipsis)
 
+	normalStyle := s.NormalTitle
+	dimStyle := s.DimmedTitle
+	if fromMain {
+		normalStyle = unmanagedHostNormalStyle
+		dimStyle = unmanagedHostDimStyle
+	}
+
 	var (
 		matchedRunes []int
 		emptyFilter  = m.FilterState() == list.Filtering && m.FilterValue() == ""
@@ -404,7 +438,7 @@ func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s
 	}
 
 	if emptyFilter {
-		_, _ = fmt.Fprint(w, s.DimmedTitle.Render(title))
+		_, _ = fmt.Fprint(w, dimStyle.Render(title))
 		return
 	}
 	if isSelected {
@@ -417,20 +451,24 @@ func renderHostTreeRow(w io.Writer, m list.Model, index int, row hostRowEntry, s
 		return
 	}
 	if isFiltered {
-		unmatched := s.NormalTitle.Inline(true)
+		unmatched := normalStyle.Inline(true)
 		matched := unmatched.Copy().Inherit(s.FilterMatch)
 		title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
 	}
-	_, _ = fmt.Fprint(w, s.NormalTitle.Render(title))
+	_, _ = fmt.Fprint(w, normalStyle.Render(title))
 }
 
 func (h hostTreeDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	if _, ok := item.(sectionSepEntry); ok {
+		_, _ = fmt.Fprint(w, "")
+		return
+	}
 	if gh, ok := item.(groupHeaderEntry); ok {
 		renderGroupHeaderRow(w, m, index, gh)
 		return
 	}
 	if row, ok := item.(hostRowEntry); ok {
-		renderHostTreeRow(w, m, index, row, &h.inner.Styles)
+		renderHostTreeRow(w, m, index, row, &h.inner.Styles, row.ref.FromMain)
 		return
 	}
 	h.inner.Render(w, m, index, item)
@@ -444,6 +482,15 @@ func renderGroupHeaderRow(w io.Writer, m list.Model, index int, gh groupHeaderEn
 	textwidth := uint(m.Width())
 	title = ansi.Truncate(title, int(textwidth), listEllipsis)
 
+	normalSt := groupHeaderNormalStyle
+	selectedSt := groupHeaderSelectedStyle
+	dimSt := groupHeaderDimStyle
+	if gh.unmanaged {
+		normalSt = unmanagedGroupHeaderNormalStyle
+		selectedSt = unmanagedGroupHeaderSelectedStyle
+		dimSt = unmanagedGroupHeaderDimStyle
+	}
+
 	var (
 		matchedRunes []int
 		emptyFilter  = m.FilterState() == list.Filtering && m.FilterValue() == ""
@@ -456,22 +503,78 @@ func renderGroupHeaderRow(w io.Writer, m list.Model, index int, gh groupHeaderEn
 	}
 
 	if emptyFilter {
-		title = groupHeaderDimStyle.Render(title)
+		title = dimSt.Render(title)
 	} else if isSelected {
-		// Keep selection visible while typing the filter (bubbles hides it for DefaultDelegate).
 		if isFiltered {
-			unmatched := groupHeaderSelectedStyle.Inline(true)
+			unmatched := selectedSt.Inline(true)
 			matched := unmatched.Copy().Inherit(filterMatchStyle)
 			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
 		}
-		title = groupHeaderSelectedStyle.Render(title)
+		title = selectedSt.Render(title)
 	} else {
 		if isFiltered {
-			unmatched := groupHeaderNormalStyle.Inline(true)
+			unmatched := normalSt.Inline(true)
 			matched := unmatched.Copy().Inherit(filterMatchStyle)
 			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
 		}
-		title = groupHeaderNormalStyle.Render(title)
+		title = normalSt.Render(title)
 	}
 	fmt.Fprint(w, title)
+}
+
+// appendMainCfgSection adds read-only host rows from the parent ssh_config.
+func appendMainCfgSection(items []list.Item, mc *scfg.Config, totalWidth int, ignoreCollapse bool) []list.Item {
+	if len(mc.DefaultHosts) > 0 {
+		defCollapsed := mc.DefaultHostsCollapsed && !ignoreCollapse
+		items = append(items, groupHeaderEntry{
+			label:      "🔒 unmanaged",
+			collapsed:  defCollapsed,
+			defaultSec: false,
+			groupIdx:   -3,
+			unmanaged:  true,
+		})
+		if !defCollapsed || ignoreCollapse {
+			n := len(mc.DefaultHosts)
+			for i := range mc.DefaultHosts {
+				h := &mc.DefaultHosts[i]
+				al := hostAlias(h)
+				prefix := treeHostPrefix(i, n)
+				line := formatHostListLine(prefix, al, totalWidth)
+				items = append(items, hostRowEntry{
+					title: line,
+					ref:   scfg.HostRef{FromMain: true, InDefault: true, HostIdx: i},
+				})
+			}
+		}
+	}
+
+	for gi := range mc.Groups {
+		g := &mc.Groups[gi]
+		collapsed := g.CollapsedByDefault && !ignoreCollapse
+		items = append(items, groupHeaderEntry{
+			label:      g.Name + " 🔒",
+			collapsed:  collapsed,
+			defaultSec: false,
+			groupIdx:   -3,
+			unmanaged:  true,
+		})
+		if collapsed && !ignoreCollapse {
+			continue
+		}
+		n := len(g.Hosts)
+		for hi := range g.Hosts {
+			h := &g.Hosts[hi]
+			al := hostAlias(h)
+			prefix := treeHostPrefix(hi, n)
+			line := formatHostListLine(prefix, al, totalWidth)
+			items = append(items, hostRowEntry{
+				title: line,
+				ref:   scfg.HostRef{FromMain: true, InDefault: false, GroupIdx: gi, HostIdx: hi},
+			})
+		}
+	}
+
+	// Blank row separates unmanaged from managed sections.
+	items = append(items, sectionSepEntry{})
+	return items
 }

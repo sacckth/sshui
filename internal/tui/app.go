@@ -35,6 +35,7 @@ type Options struct {
 
 	SSHHostsPath       string         // absolute path to the sshui ssh_hosts file
 	MainSSHConfigPath  string         // absolute path to the user's main ssh_config (for export wizard)
+	MainConfig         *scfg.Config   // parsed main ssh_config snapshot (bridge-stripped); nil if same as ssh_hosts or unreadable
 	OverlayPath        string         // absolute path to password_hosts.toml
 	Overlay            *overlay.File  // pre-loaded password overlay (nil = none)
 	BrowseMode         string         // initial browse mode: merged | openssh | password
@@ -74,6 +75,7 @@ const (
 	modePasswordDetailEdit
 	modePasswordDetailInput
 	modeLockConflict
+	modeConfirmImport // y/N: remove imported host from main ssh_config?
 )
 
 type detailTab int
@@ -151,6 +153,7 @@ type Model struct {
 	overlayPath       string
 	sshHostsPath      string
 	mainSSHConfigPath string
+	mainCfg           *scfg.Config // read-only snapshot of the parent ssh_config (bridge-stripped); nil when same as ssh_hosts
 	appConfig         *appcfg.Config
 	// Lock state per file
 	lockedSSHHosts bool
@@ -158,6 +161,9 @@ type Model struct {
 	// Setup wizard
 	exportWizardNeeded bool
 	wizardStep         int // 0=ssh_config, 1=ssh_hosts, 2=overlay, 3=copy question
+	// Import from main ssh_config
+	pendingImportRef scfg.HostRef // the FromMain ref being imported
+
 	// Password host detail
 	pwSelIdx       int    // index into overlayData.PasswordHosts
 	pwEditFieldKey string // toml field id while editing (hostname, patterns, …)
@@ -221,13 +227,14 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		overlayPath:        opts.OverlayPath,
 		sshHostsPath:       opts.SSHHostsPath,
 		mainSSHConfigPath:  opts.MainSSHConfigPath,
+		mainCfg:            opts.MainConfig,
 		appConfig:          opts.AppConfig,
 		exportWizardNeeded: opts.ExportWizardNeeded,
 		pwSelIdx:           -1,
 		pendingDeletePwIdx: -1,
 	}
 	lw := m.leftPaneWidth()
-	hostItems := buildHostItemsFiltered(cfg, m.overlayData, m.browseMode, lw, false)
+	hostItems := buildHostItemsFiltered(cfg, m.overlayData, m.browseMode, lw, false, m.mainCfg)
 	l := list.New(hostItems, newHostTreeDelegate(), lw, max(6, h-4))
 	l.Title = m.logoLine()
 	l.Styles.Title = titleStyle
@@ -339,7 +346,7 @@ func (m *Model) updateHostList(msg tea.Msg) tea.Cmd {
 // FilterMatchesMsg is processed — callers must return the returned tea.Cmd so refilter runs.
 func (m *Model) rebuildHostList() tea.Cmd {
 	lw := m.leftPaneWidth()
-	items := buildHostItemsFiltered(m.cfg, m.overlayData, m.browseMode, lw, m.ignoreCollapseForActiveFilter())
+	items := buildHostItemsFiltered(m.cfg, m.overlayData, m.browseMode, lw, m.ignoreCollapseForActiveFilter(), m.mainCfg)
 	cmd := m.hostList.SetItems(items)
 	if m.hostList.FilterState() == list.Unfiltered {
 		m.syncTreeSelection()
@@ -349,7 +356,7 @@ func (m *Model) rebuildHostList() tea.Cmd {
 
 // resyncSelectionAfterStructureChange fixes selRef and list cursor after cfg shape changes.
 func (m *Model) resyncSelectionAfterStructureChange() {
-	if m.cfg.ValidateRef(m.selRef) == nil {
+	if m.resolveValidateRef(m.selRef) == nil {
 		m.syncTreeSelection()
 		m.refreshDetailList()
 		m.refreshPasswordDetailList()
@@ -560,6 +567,34 @@ func (m *Model) syncTreeSelection() {
 	}
 }
 
+// hostConfig returns the *Config that ref belongs to.
+func (m *Model) hostConfig(ref scfg.HostRef) *scfg.Config {
+	if ref.FromMain && m.mainCfg != nil {
+		return m.mainCfg
+	}
+	return m.cfg
+}
+
+// resolveHostAt returns the HostBlock for ref, dispatching to mainCfg when FromMain.
+func (m *Model) resolveHostAt(ref scfg.HostRef) *scfg.HostBlock {
+	return m.hostConfig(ref).HostAt(ref)
+}
+
+// resolveValidateRef validates ref against the correct config.
+func (m *Model) resolveValidateRef(ref scfg.HostRef) error {
+	return m.hostConfig(ref).ValidateRef(ref)
+}
+
+// mainRefBlocked returns true and sets a status message when the selected ref
+// points into the read-only main ssh_config. Callers should abort the mutation.
+func (m *Model) mainRefBlocked() bool {
+	if !m.selRef.FromMain {
+		return false
+	}
+	m.status = errStyle.Render("Read-only host from ssh_config — use Import (A menu) to move it to managed.")
+	return true
+}
+
 func (m *Model) readOnlyBlocked() bool {
 	if !m.readOnly {
 		return false
@@ -635,8 +670,12 @@ func (m *Model) exitEditMode() {
 }
 
 // editModeBlocked ensures edit mode is active before mutating; acquires locks.
+// Also blocks when the selected host is from the read-only main ssh_config.
 func (m *Model) editModeBlocked() bool {
 	if m.readOnlyBlocked() {
+		return true
+	}
+	if m.mainRefBlocked() {
 		return true
 	}
 	if !m.editMode {
@@ -657,10 +696,10 @@ func (m *Model) newDetailList() list.Model {
 
 	var items []list.Item
 	var title string
-	if err := m.cfg.ValidateRef(m.selRef); err != nil {
+	if err := m.resolveValidateRef(m.selRef); err != nil {
 		title = detailTabTitle(m.detailTab) + " — (select a host)"
 	} else {
-		h := m.cfg.HostAt(m.selRef)
+		h := m.resolveHostAt(m.selRef)
 		switch m.detailTab {
 		case detailTabConnectivity:
 			for i := range h.Directives {
@@ -678,8 +717,12 @@ func (m *Model) newDetailList() list.Model {
 		}
 		sub := HostConnectivityTitle(h)
 		title = detailTabTitle(m.detailTab) + " — " + sub
-		if !m.selRef.InDefault && m.selRef.GroupIdx >= 0 && m.selRef.GroupIdx < len(m.cfg.Groups) {
-			title += " — " + m.cfg.Groups[m.selRef.GroupIdx].Name
+		c := m.hostConfig(m.selRef)
+		if !m.selRef.InDefault && m.selRef.GroupIdx >= 0 && m.selRef.GroupIdx < len(c.Groups) {
+			title += " — " + c.Groups[m.selRef.GroupIdx].Name
+		}
+		if m.selRef.FromMain {
+			title += " 🔒"
 		}
 	}
 	l := list.New(items, delegate, rw, rh)
@@ -706,10 +749,10 @@ func detailTabTitle(t detailTab) string {
 func (m *Model) overviewPanel() string {
 	rw := max(1, m.rightPaneWidth()-2)
 	boxStyle := m.rightPaneBoxStyle(rw)
-	if m.cfg.ValidateRef(m.selRef) != nil {
+	if m.resolveValidateRef(m.selRef) != nil {
 		return boxStyle.Render(statusStyle.Render("No host selected."))
 	}
-	h := m.cfg.HostAt(m.selRef)
+	h := m.resolveHostAt(m.selRef)
 	var b strings.Builder
 	if len(h.HostComments) > 0 {
 		b.WriteString(statusStyle.Render("#@host metadata") + "\n")
@@ -767,6 +810,19 @@ func (m *Model) applyDetailListDelegateBG(d *list.DefaultDelegate) {
 }
 
 func (m *Model) toggleFoldAt(gh groupHeaderEntry) {
+	if gh.groupIdx == -3 && m.mainCfg != nil {
+		if strings.HasPrefix(gh.label, "🔒 unmanaged") {
+			m.mainCfg.DefaultHostsCollapsed = !m.mainCfg.DefaultHostsCollapsed
+		} else {
+			for gi := range m.mainCfg.Groups {
+				if strings.HasPrefix(gh.label, m.mainCfg.Groups[gi].Name) {
+					m.mainCfg.Groups[gi].CollapsedByDefault = !m.mainCfg.Groups[gi].CollapsedByDefault
+					break
+				}
+			}
+		}
+		return
+	}
 	if gh.defaultSec {
 		m.cfg.DefaultHostsCollapsed = !m.cfg.DefaultHostsCollapsed
 	} else if gh.groupIdx >= 0 && gh.groupIdx < len(m.cfg.Groups) {
@@ -887,10 +943,10 @@ func actionMenuListHeight(termH int) int {
 
 // actionMenuTargetText is the host line shown under "Actions".
 func (m *Model) actionMenuTargetText() string {
-	if m.cfg.ValidateRef(m.selRef) != nil {
+	if m.resolveValidateRef(m.selRef) != nil {
 		return "Host: —"
 	}
-	return "Host: " + hostAlias(m.cfg.HostAt(m.selRef))
+	return "Host: " + hostAlias(m.resolveHostAt(m.selRef))
 }
 
 func actionMenuTargetLineStyle() lipgloss.Style {
@@ -927,8 +983,11 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 		actionItem{id: "ssh", desc: "SSH session (uses first Host pattern)"},
 		actionItem{id: "sftp", desc: "SFTP session"},
 		actionItem{id: "copy", desc: "Copy ssh command"},
-		actionItem{id: "cancel", desc: ""},
 	}
+	if m.selRef.FromMain {
+		items = append(items, actionItem{id: "import", desc: "Import host to managed ssh_hosts file"})
+	}
+	items = append(items, actionItem{id: "cancel", desc: ""})
 	d := list.NewDefaultDelegate()
 	d.ShowDescription = true
 	d.Styles.NormalTitle = styleWithPaneBG(d.Styles.NormalTitle)
@@ -993,7 +1052,7 @@ func (m *Model) startSSHConnectPending(returnMode viewMode, target, note string,
 }
 
 func (m *Model) beginInteractiveSSH(returnMode viewMode, post sshPostWildKind) (*Model, tea.Cmd) {
-	h := m.cfg.HostAt(m.selRef)
+	h := m.resolveHostAt(m.selRef)
 	plan := sshConnectPlanFromHost(h)
 	if plan.Invalid {
 		return m, func() tea.Msg {
@@ -1102,11 +1161,31 @@ func (m *Model) reloadFromDisk() tea.Cmd {
 		m.readOnly = false
 	}
 	m.dirty = false
+	m.reloadMainCfg()
 	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
 	m.syncBrowsePreview()
 	m.status = "Reloaded from disk."
 	return rb
+}
+
+// reloadMainCfg refreshes the read-only mainCfg snapshot from disk.
+func (m *Model) reloadMainCfg() {
+	if m.mainSSHConfigPath == "" || m.mainSSHConfigPath == m.path {
+		m.mainCfg = nil
+		return
+	}
+	data, err := os.ReadFile(m.mainSSHConfigPath)
+	if err != nil || len(data) == 0 {
+		m.mainCfg = nil
+		return
+	}
+	parsed, err := scfg.Parse(strings.NewReader(string(data)))
+	if err != nil {
+		m.mainCfg = nil
+		return
+	}
+	m.mainCfg = scfg.StripBridgeIncludes(parsed, m.sshHostsPath)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1404,6 +1483,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Password host removed."
 					return m, rb
 				}
+				if m.selRef.FromMain {
+					m.status = errStyle.Render("Cannot delete host from main ssh_config — use Import first.")
+					m.mode = m.confirmReturnMode
+					return m, nil
+				}
 				m.cfg.DeleteHost(m.selRef)
 				m.dirty = true
 				m.pendingDeletePwIdx = -1
@@ -1512,6 +1596,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case modeConfirmImport:
+			switch msg.String() {
+			case "y", "Y", "enter":
+				if m.mainCfg != nil && m.mainCfg.ValidateRef(m.pendingImportRef) == nil {
+					m.mainCfg.DeleteHost(m.pendingImportRef)
+					if err := m.saveMainConfig(); err != nil {
+						m.status = errStyle.Render("Remove from main: " + err.Error())
+					} else {
+						m.reloadMainCfg()
+						m.status = "Host imported and removed from main ssh_config."
+					}
+				}
+				m.mode = modeTree
+				rb := m.rebuildHostList()
+				m.layoutDetailPanes()
+				m.syncTreeSelection()
+				m.refreshDetailList()
+				return m, rb
+			case "n", "N", "esc":
+				m.status = "Host imported (kept in main ssh_config too)."
+				m.mode = modeTree
+				rb := m.rebuildHostList()
+				m.layoutDetailPanes()
+				m.syncTreeSelection()
+				m.refreshDetailList()
+				return m, rb
+			}
+			return m, nil
+
 		case modeGroupPicker:
 			return m.updateGroupPicker(msg)
 
@@ -1528,7 +1641,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pwEditFieldKey = ""
 				m.mode = m.returnAfterInput
 				if m.returnAfterInput == modeDetail {
-					if m.cfg.ValidateRef(m.selRef) == nil {
+					if m.resolveValidateRef(m.selRef) == nil {
 						m.refreshDetailList()
 					}
 				}
@@ -1595,7 +1708,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeInputDirectiveValue:
 		val := strings.TrimSpace(m.valueInput.Value())
-		h := m.cfg.HostAt(m.selRef)
+		h := m.resolveHostAt(m.selRef)
 		if m.editDirectiveIndex >= 0 && m.editDirectiveIndex < len(h.Directives) {
 			h.Directives[m.editDirectiveIndex].Value = val
 			m.status = "Directive updated."
@@ -1793,7 +1906,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		rb := m.rebuildHostList()
 		m.editGroupIdx = -1
 		m.mode = modeDetail
-		if m.cfg.ValidateRef(m.selRef) == nil {
+		if m.resolveValidateRef(m.selRef) == nil {
 			m.refreshDetailList()
 		}
 		m.status = fmt.Sprintf("Renamed group to %q.", name)
@@ -1808,7 +1921,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		rb := m.rebuildHostList()
 		m.editGroupIdx = -1
 		m.mode = modeDetail
-		if m.cfg.ValidateRef(m.selRef) == nil {
+		if m.resolveValidateRef(m.selRef) == nil {
 			m.refreshDetailList()
 		}
 		m.status = "Group description updated."
@@ -1827,7 +1940,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			}
 			kept = append(kept, line)
 		}
-		h := m.cfg.HostAt(m.selRef)
+		h := m.resolveHostAt(m.selRef)
 		h.HostComments = kept
 		m.dirty = true
 		m.mode = modeDetail
@@ -1906,7 +2019,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "s":
 		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 			m.selRef = row.ref
-			if m.cfg.ValidateRef(m.selRef) == nil {
+			if m.resolveValidateRef(m.selRef) == nil {
 				return m.beginInteractiveSSH(modeTree, postWildConnectSSH)
 			}
 		}
@@ -1968,7 +2081,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selRef = row.ref
 			m.confirmReturnMode = modeTree
 			m.mode = modeConfirmDeleteHost
-			m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
+			m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.resolveHostAt(m.selRef)))
 			return m, nil
 		}
 		if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
@@ -2110,7 +2223,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case msg.String() == "s":
 			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 				m.selRef = row.ref
-				if m.cfg.ValidateRef(m.selRef) == nil {
+				if m.resolveValidateRef(m.selRef) == nil {
 					return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
 				}
 			}
@@ -2178,7 +2291,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case msg.String() == "s":
-		if m.cfg.ValidateRef(m.selRef) == nil {
+		if m.resolveValidateRef(m.selRef) == nil {
 			return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
 		}
 	case msg.String() == "A":
@@ -2192,7 +2305,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.returnAfterInput = modeDetail
 		m.mode = modeInputHostMeta
-		h := m.cfg.HostAt(m.selRef)
+		h := m.resolveHostAt(m.selRef)
 		m.valueInput.SetValue(strings.Join(h.HostComments, "\n"))
 		m.valueInput.Placeholder = "lines (prefix # or plain text → #@host:)"
 		m.valueInput.Focus()
@@ -2231,7 +2344,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.returnAfterInput = modeDetail
-			h := m.cfg.HostAt(m.selRef)
+			h := m.resolveHostAt(m.selRef)
 			m.valueInput.SetValue(h.Directives[it.idx].Value)
 			m.valueInput.Placeholder = "value"
 			m.pendingDirectiveKey = h.Directives[it.idx].Key
@@ -2245,7 +2358,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if it, ok := m.detailList.SelectedItem().(dirEntry); ok {
-			h := m.cfg.HostAt(m.selRef)
+			h := m.resolveHostAt(m.selRef)
 			h.Directives = append(h.Directives[:it.idx], h.Directives[it.idx+1:]...)
 			m.dirty = true
 			m.refreshDetailList()
@@ -2258,7 +2371,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.returnAfterInput = modeDetail
 		m.mode = modeInputDuplicateHost
-		m.valueInput.SetValue(hostTitle(m.cfg.HostAt(m.selRef)) + "-copy")
+		m.valueInput.SetValue(hostTitle(m.resolveHostAt(m.selRef)) + "-copy")
 		m.valueInput.Placeholder = "new Host patterns"
 		m.valueInput.Focus()
 		return m, textinput.Blink
@@ -2269,7 +2382,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingDeletePwIdx = -1
 		m.confirmReturnMode = modeDetail
 		m.mode = modeConfirmDeleteHost
-		m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.cfg.HostAt(m.selRef)))
+		m.status = fmt.Sprintf("Delete host %q? [y/N]", hostTitle(m.resolveHostAt(m.selRef)))
 		return m, nil
 	case msg.String() == "v":
 		if m.editModeBlocked() {
@@ -2353,6 +2466,8 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.beginInteractiveSSH(modeActionMenu, postWildConnectSFTP)
 			case "copy":
 				return m.beginInteractiveSSH(modeActionMenu, postWildCopyCmd)
+			case "import":
+				return m.startImportFromMain()
 			}
 		}
 	}
@@ -2406,7 +2521,7 @@ func (m *Model) updateGroupPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = m.groupPickerReturnMode
 		m.status = ""
 		m.layoutDetailPanes()
-		if m.groupPickerReturnMode == modeDetail && m.cfg.ValidateRef(m.selRef) == nil {
+		if m.groupPickerReturnMode == modeDetail && m.resolveValidateRef(m.selRef) == nil {
 			m.refreshDetailList()
 		}
 		if m.groupPickerReturnMode == modeTree {
@@ -2601,7 +2716,7 @@ func (m Model) View() string {
 		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Top, framed, placeOpts...))
 		return b.String()
 
-	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
+	case modeConfirmDeleteHost, modeConfirmDeleteGroup, modeConfirmImport:
 		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(m.status)
 		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
 		return b.String()
@@ -2771,7 +2886,7 @@ func (m Model) View() string {
 		var right string
 		if _, onPw := m.hostList.SelectedItem().(passwordHostRowEntry); onPw {
 			right = m.pwDetailList.View()
-		} else if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.cfg.ValidateRef(m.selRef) == nil {
+		} else if _, onHost := m.hostList.SelectedItem().(hostRowEntry); onHost && m.resolveValidateRef(m.selRef) == nil {
 			right = m.detailList.View()
 		} else {
 			right = paneRightStyle.Copy().
@@ -3054,7 +3169,10 @@ func (m *Model) handleExportWizard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N":
 			return m.wizardFinish(false)
 		case "q", "Q":
-			return m, tea.Quit
+			m.exportWizardNeeded = false
+			m.mode = modeTree
+			m.status = "Setup wizard cancelled."
+			return m, nil
 		case "esc":
 			m.wizardStep = 2
 			m.wizardPrepareStep()
@@ -3093,7 +3211,10 @@ func (m *Model) handleExportWizard(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		if m.wizardStep == 0 {
-			return m, tea.Quit
+			m.exportWizardNeeded = false
+			m.mode = modeTree
+			m.status = "Setup wizard cancelled."
+			return m, nil
 		}
 		m.wizardStep--
 		m.wizardPrepareStep()
@@ -3196,6 +3317,69 @@ func wizardDefaultEditor() string {
 	return "vi"
 }
 
+// --- Import from main ssh_config ---
+
+func (m *Model) startImportFromMain() (tea.Model, tea.Cmd) {
+	if !m.selRef.FromMain || m.mainCfg == nil {
+		m.status = errStyle.Render("No main-config host selected.")
+		m.mode = m.actionReturnMode
+		return m, nil
+	}
+	if m.mainCfg.ValidateRef(m.selRef) != nil {
+		m.status = errStyle.Render("Invalid host reference.")
+		m.mode = m.actionReturnMode
+		return m, nil
+	}
+	hb := m.mainCfg.HostAt(m.selRef)
+	clone := cloneHostBlockForImport(*hb)
+	m.cfg.DefaultHosts = append(m.cfg.DefaultHosts, clone)
+	m.dirty = true
+	if err := m.save(); err != nil {
+		m.status = errStyle.Render("Save managed: " + err.Error())
+		m.mode = modeTree
+		return m, nil
+	}
+	m.pendingImportRef = m.selRef
+	m.selRef = scfg.HostRef{InDefault: true, HostIdx: len(m.cfg.DefaultHosts) - 1}
+	alias := hostAlias(&clone)
+	m.status = fmt.Sprintf("Imported %q — remove from main ssh_config? [Y/n]", alias)
+	m.mode = modeConfirmImport
+	return m, nil
+}
+
+func cloneHostBlockForImport(h scfg.HostBlock) scfg.HostBlock {
+	out := scfg.HostBlock{
+		HostComments: append([]string(nil), h.HostComments...),
+		Patterns:     append([]string(nil), h.Patterns...),
+		Directives:   make([]scfg.Directive, len(h.Directives)),
+	}
+	copy(out.Directives, h.Directives)
+	return out
+}
+
+// saveMainConfig writes the in-memory mainCfg to disk with a backup.
+func (m *Model) saveMainConfig() error {
+	if m.mainCfg == nil || m.mainSSHConfigPath == "" {
+		return fmt.Errorf("no main config to save")
+	}
+	out, err := scfg.String(m.mainCfg)
+	if err != nil {
+		return fmt.Errorf("serialize main config: %w", err)
+	}
+	body := []byte(out)
+	prev, err := os.ReadFile(m.mainSSHConfigPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read main config for backup: %w", err)
+	}
+	if err == nil {
+		bkp := hiddenBackupPath(m.mainSSHConfigPath)
+		if werr := os.WriteFile(bkp, prev, 0o600); werr != nil {
+			return fmt.Errorf("backup main config %s: %w", bkp, werr)
+		}
+	}
+	return os.WriteFile(m.mainSSHConfigPath, body, 0o600)
+}
+
 // browseModeSuffix returns a short string for the footer to indicate the current browse mode.
 func (m *Model) browseModeSuffix() string {
 	switch m.browseMode {
@@ -3224,9 +3408,9 @@ Browse (split view)
   /         Filter host list
   z         Collapse/expand group
   B         Cycle browse mode: merged > openssh > password (persisted)
-  A         Actions: ssh / sftp / copy
+  A         Actions: ssh / sftp / copy / import (on ssh_config hosts)
   n         New host (OpenSSH or password, depends on browse mode)
-  c         Create new empty group (enters edit mode)
+  c         Create group (OpenSSH or password, depends on browse mode)
   D         Delete group (when a group header row is selected)
   x         Delete host (confirm)
   g         Move selected host to group / (default)
@@ -3238,6 +3422,16 @@ Browse (split view)
   I         Re-run setup wizard (move hosts, Include, config.toml)
   ?         Open this help
   q         Quit
+
+Main ssh_config + managed ssh_hosts (dual tree)
+  When config.toml sets ssh_config to a different file than ssh_hosts_path, the tree
+  shows two sections separated by a blank line:
+    🔒 unmanaged   Read-only hosts from the parent ssh_config (e.g. ~/.ssh/config).
+                   Shown in a dimmer color. Groups keep their names with a 🔒 suffix.
+    ✏️  managed     Editable hosts in ssh_hosts (the primary edit target).
+  Hosts in the unmanaged section cannot be edited, deleted, or moved directly.
+  To move a host into managed, select it, press A → Import. sshui copies the host
+  into ssh_hosts and prompts to remove it from the main file (default: yes).
 
 Edit mode
   sshui starts in read-only mode. Mutating actions enter edit mode and acquire a
@@ -3269,7 +3463,7 @@ Host detail (split: tree | detail)
   tab       Focus tree vs detail pane
   t         Cycle tab: Overview > All > Connectivity
   i         Edit #@host metadata lines
-  A         Actions menu (ssh / sftp / copy)
+  A         Actions menu (ssh / sftp / copy / import)
   s         SSH connect
   a / k     Add directive (picker / custom key)
   e / d     Edit value / delete directive

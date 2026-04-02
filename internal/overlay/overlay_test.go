@@ -160,6 +160,88 @@ func TestAskpassEnv(t *testing.T) {
 	}
 }
 
+func TestAddGroup(t *testing.T) {
+	f := &File{Version: 1}
+	if err := f.AddGroup("servers"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Groups) != 1 || f.Groups[0] != "servers" {
+		t.Fatalf("Groups = %v", f.Groups)
+	}
+	if err := f.AddGroup("servers"); err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	if err := f.AddGroup(""); err == nil {
+		t.Fatal("expected empty name error")
+	}
+}
+
+func TestGroupedHosts(t *testing.T) {
+	f := &File{
+		Version: 1,
+		PasswordHosts: []PasswordHost{
+			{Group: "", Patterns: []string{"a"}, Hostname: "h1"},
+			{Group: "dev", Patterns: []string{"b"}, Hostname: "h2"},
+			{Group: "dev", Patterns: []string{"c"}, Hostname: "h3"},
+			{Group: "prod", Patterns: []string{"d"}, Hostname: "h4"},
+		},
+	}
+	grouped := f.GroupedHosts()
+	if len(grouped[""]) != 1 {
+		t.Fatalf("ungrouped: %v", grouped[""])
+	}
+	if len(grouped["dev"]) != 2 {
+		t.Fatalf("dev: %v", grouped["dev"])
+	}
+	if len(grouped["prod"]) != 1 {
+		t.Fatalf("prod: %v", grouped["prod"])
+	}
+}
+
+func TestOrderedGroups(t *testing.T) {
+	f := &File{
+		Version: 1,
+		Groups:  []string{"prod", "dev"},
+		PasswordHosts: []PasswordHost{
+			{Group: "dev", Patterns: []string{"a"}, Hostname: "h1"},
+			{Group: "staging", Patterns: []string{"b"}, Hostname: "h2"},
+		},
+	}
+	ordered := f.OrderedGroups()
+	// Should be: prod, dev (from explicit Groups), then staging (from hosts).
+	if len(ordered) != 3 {
+		t.Fatalf("expected 3, got %v", ordered)
+	}
+	if ordered[0] != "prod" || ordered[1] != "dev" || ordered[2] != "staging" {
+		t.Fatalf("order: %v", ordered)
+	}
+}
+
+func TestGroupRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "groups.toml")
+	f := &File{
+		Version: 1,
+		Groups:  []string{"servers"},
+		PasswordHosts: []PasswordHost{
+			{Group: "servers", Patterns: []string{"web"}, Hostname: "10.0.0.1", Askpass: "/bin/ap"},
+		},
+	}
+	if err := Save(p, f); err != nil {
+		t.Fatal(err)
+	}
+	f2, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f2.Groups) != 1 || f2.Groups[0] != "servers" {
+		t.Fatalf("groups: %v", f2.Groups)
+	}
+	if f2.PasswordHosts[0].Group != "servers" {
+		t.Fatalf("host group: %q", f2.PasswordHosts[0].Group)
+	}
+}
+
 func TestDeletePasswordGroup(t *testing.T) {
 	f := &File{
 		Version: 1,

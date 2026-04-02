@@ -83,4 +83,3 @@ func TestStaleLock(t *testing.T) {
 
 	Release(data)
 }
-

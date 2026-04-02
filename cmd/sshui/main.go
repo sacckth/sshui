@@ -156,6 +156,14 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		displayCfg = config.MergeIncludes(sshHostsPath, baseCfg)
 	}
 
+	var mainCfg *config.Config
+	if mainPath != sshHostsPath {
+		mainCfg, _ = loadParsedConfig(mainPath)
+		if mainCfg != nil {
+			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath)
+		}
+	}
+
 	ov, err := overlay.Load(overlayPath)
 	if err != nil {
 		return fmt.Errorf("load overlay: %w", err)
@@ -178,6 +186,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		AppConfigPath:      cfgTomlPath,
 		SSHHostsPath:       sshHostsPath,
 		MainSSHConfigPath:  mainPath,
+		MainConfig:         mainCfg,
 		OverlayPath:        overlayPath,
 		Overlay:            ov,
 		BrowseMode:         ac.EffectiveBrowseMode(),
