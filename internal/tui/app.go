@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
@@ -48,6 +49,8 @@ const (
 	modeActionMenu
 	modeInputHostMeta
 	modeAppCfgView
+	modeSSHConnectPending
+	modeSSHConnectWildcardInput
 )
 
 type detailTab int
@@ -100,6 +103,17 @@ type Model struct {
 
 	helpViewport   viewport.Model
 	helpReturnMode viewMode
+
+	sshConnectReturnMode       viewMode
+	sshConnectPendingCancelled bool
+	sshConnectPendingAlias     string
+	sshConnectPendingNote      string // e.g. multi-pattern warning on pending / wildcard screens
+	sshConnectPendingSFTP      bool
+	sshConnectWildKind         sshWildKind
+	sshConnectWildPrefix       string
+	sshConnectWildSuffix       string
+	sshConnectWildPattern      string // first Host pattern (for prompts)
+	sshPostWildKind            sshPostWildKind
 }
 
 var (
@@ -686,16 +700,8 @@ type shellProcDoneMsg struct {
 	err error
 }
 
-func sshConnectAlias(h *scfg.HostBlock) (string, bool) {
-	if len(h.Patterns) != 1 {
-		return "", false
-	}
-	p := strings.TrimSpace(h.Patterns[0])
-	if p == "" || strings.ContainsAny(p, "*?!") {
-		return "", false
-	}
-	return p, true
-}
+// sshConnectReadyMsg is sent after the short "Connecting…" delay before spawning ssh.
+type sshConnectReadyMsg struct{}
 
 // actionMenuOuterWidth is the framed actions modal width.
 func actionMenuOuterWidth(termW int) int {
@@ -748,7 +754,7 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 		m.selRef = row.ref
 	}
 	items := []list.Item{
-		actionItem{id: "ssh", desc: "SSH session (single alias)"},
+		actionItem{id: "ssh", desc: "SSH session (uses first Host pattern)"},
 		actionItem{id: "sftp", desc: "SFTP session"},
 		actionItem{id: "copy", desc: "Copy ssh command"},
 		actionItem{id: "cancel", desc: ""},
@@ -773,23 +779,120 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 	m.mode = modeActionMenu
 }
 
-func (m *Model) sshExecCmd(sftp bool) tea.Cmd {
-	h := m.cfg.HostAt(m.selRef)
-	alias, ok := sshConnectAlias(h)
-	if !ok {
+func (m *Model) sshExecCmd() tea.Cmd {
+	target := strings.TrimSpace(m.sshConnectPendingAlias)
+	if target == "" {
 		return func() tea.Msg {
-			return shellProcDoneMsg{err: fmt.Errorf("need one non-wildcard Host pattern")}
+			return shellProcDoneMsg{err: fmt.Errorf("empty ssh target")}
 		}
 	}
+	sftp := m.sshConnectPendingSFTP
 	var c *exec.Cmd
 	if sftp {
-		c = exec.Command("sftp", alias)
+		c = exec.Command("sftp", target)
 	} else {
-		c = exec.Command("ssh", alias)
+		c = exec.Command("ssh", target)
 	}
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return shellProcDoneMsg{err: err}
 	})
+}
+
+// startSSHConnectPending shows a short gate before ssh/sftp; Esc cancels (tick still arrives but is ignored).
+func (m *Model) startSSHConnectPending(returnMode viewMode, target, note string, sftp bool) (*Model, tea.Cmd) {
+	m.sshConnectReturnMode = returnMode
+	m.sshConnectPendingCancelled = false
+	m.sshConnectPendingAlias = strings.TrimSpace(target)
+	m.sshConnectPendingNote = note
+	m.sshConnectPendingSFTP = sftp
+	m.mode = modeSSHConnectPending
+	return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return sshConnectReadyMsg{} })
+}
+
+func (m *Model) beginInteractiveSSH(returnMode viewMode, post sshPostWildKind) (*Model, tea.Cmd) {
+	h := m.cfg.HostAt(m.selRef)
+	plan := sshConnectPlanFromHost(h)
+	if plan.Invalid {
+		return m, func() tea.Msg {
+			return shellProcDoneMsg{err: fmt.Errorf("need at least one Host pattern")}
+		}
+	}
+	note := sshConnectMultiPatternNote(plan)
+	if plan.NeedWildcard {
+		return m.enterSSHWildcardPrompt(returnMode, plan, post, note)
+	}
+	if post == postWildCopyCmd {
+		return m.finishSSHCopy(plan.DirectTarget)
+	}
+	sftp := post == postWildConnectSFTP
+	return m.startSSHConnectPending(returnMode, plan.DirectTarget, note, sftp)
+}
+
+func (m *Model) enterSSHWildcardPrompt(returnMode viewMode, plan sshConnectPlan, post sshPostWildKind, note string) (*Model, tea.Cmd) {
+	m.sshConnectReturnMode = returnMode
+	m.sshPostWildKind = post
+	m.sshConnectWildKind = plan.WildKind
+	m.sshConnectWildPrefix = plan.LitPrefix
+	m.sshConnectWildSuffix = plan.LitSuffix
+	m.sshConnectWildPattern = plan.FirstPattern
+	m.sshConnectPendingNote = note
+	m.valueInput.SetValue("")
+	m.valueInput.Placeholder = sshWildcardValuePlaceholder(plan.WildKind)
+	m.valueInput.Width = max(12, min(50, m.width-10))
+	m.valueInput.Focus()
+	m.mode = modeSSHConnectWildcardInput
+	return m, textinput.Blink
+}
+
+func (m *Model) submitSSHWildcardConnect() (tea.Model, tea.Cmd) {
+	target := composeSSHWildcardTarget(m.sshConnectWildKind, m.sshConnectWildPrefix, m.sshConnectWildSuffix, m.valueInput.Value())
+	if strings.TrimSpace(target) == "" {
+		m.status = errStyle.Render("Enter a hostname.")
+		return m, nil
+	}
+	switch m.sshPostWildKind {
+	case postWildCopyCmd:
+		return m.finishSSHCopy(target)
+	case postWildConnectSSH:
+		return m.startSSHConnectPending(m.sshConnectReturnMode, target, m.sshConnectPendingNote, false)
+	case postWildConnectSFTP:
+		return m.startSSHConnectPending(m.sshConnectReturnMode, target, m.sshConnectPendingNote, true)
+	default:
+		m.status = errStyle.Render("Internal: unknown SSH action.")
+		return m, nil
+	}
+}
+
+func (m *Model) finishSSHCopy(target string) (*Model, tea.Cmd) {
+	cmdStr := "ssh " + strings.TrimSpace(target)
+	if err := clipboard.WriteAll(cmdStr); err != nil {
+		m.status = errStyle.Render(err.Error())
+	} else {
+		m.status = "Copied: " + cmdStr
+	}
+	m.sshConnectPendingNote = ""
+	m.mode = m.actionReturnMode
+	if m.mode == modeDetail {
+		m.layoutDetailPanes()
+		m.refreshDetailList()
+	} else if m.mode == modeTree {
+		m.layoutDetailPanes()
+		m.refreshDetailList()
+	}
+	return m, nil
+}
+
+func (m *Model) restoreSSHConnectReturnLayout() {
+	if m.sshConnectReturnMode == modeDetail {
+		m.layoutDetailPanes()
+		m.refreshDetailList()
+	} else if m.sshConnectReturnMode == modeTree {
+		m.layoutDetailPanes()
+		m.refreshDetailList()
+	} else if m.sshConnectReturnMode == modeActionMenu {
+		m.actionMenuList.SetWidth(actionMenuOuterWidth(m.width))
+		m.actionMenuList.SetHeight(actionMenuListHeight(m.height))
+	}
 }
 
 func (m *Model) reloadFromDisk() tea.Cmd {
@@ -856,6 +959,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeHelp {
 			m.layoutHelpViewport()
 		}
+		if m.mode == modeSSHConnectPending || m.mode == modeSSHConnectWildcardInput {
+			m.layoutDetailPanes()
+		}
 		return m, nil
 
 	// Bubbles schedules filter reflow asynchronously; the message must reach the list that
@@ -871,6 +977,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return m, nil
 		}
+
+	case sshConnectReadyMsg:
+		if m.mode != modeSSHConnectPending {
+			m.sshConnectPendingCancelled = false
+			return m, nil
+		}
+		if m.sshConnectPendingCancelled {
+			m.sshConnectPendingCancelled = false
+			m.status = ""
+			m.mode = m.sshConnectReturnMode
+			m.restoreSSHConnectReturnLayout()
+			return m, nil
+		}
+		m.mode = m.sshConnectReturnMode
+		m.restoreSSHConnectReturnLayout()
+		return m, m.sshExecCmd()
 
 	case shellProcDoneMsg:
 		if m.mode == modeActionMenu {
@@ -921,6 +1043,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var vcmd tea.Cmd
 			m.helpViewport, vcmd = m.helpViewport.Update(msg)
 			return m, vcmd
+
+		case modeSSHConnectPending:
+			switch msg.String() {
+			case "esc":
+				m.sshConnectPendingCancelled = true
+				m.mode = m.sshConnectReturnMode
+				m.status = ""
+				m.restoreSSHConnectReturnLayout()
+				return m, nil
+			}
+			return m, nil
+
+		case modeSSHConnectWildcardInput:
+			switch msg.String() {
+			case "esc":
+				m.sshConnectPendingNote = ""
+				m.sshPostWildKind = postWildNone
+				m.mode = m.sshConnectReturnMode
+				m.status = ""
+				m.restoreSSHConnectReturnLayout()
+				return m, nil
+			case "enter":
+				return m.submitSSHWildcardConnect()
+			}
+			var wcmd tea.Cmd
+			m.valueInput, wcmd = m.valueInput.Update(msg)
+			return m, wcmd
 
 		case modeConfirmDeleteHost:
 			switch msg.String() {
@@ -1277,7 +1426,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 			m.selRef = row.ref
 			if m.cfg.ValidateRef(m.selRef) == nil {
-				return m, m.sshExecCmd(false)
+				return m.beginInteractiveSSH(modeTree, postWildConnectSSH)
 			}
 		}
 
@@ -1430,7 +1579,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
 				m.selRef = row.ref
 				if m.cfg.ValidateRef(m.selRef) == nil {
-					return m, m.sshExecCmd(false)
+					return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
 				}
 			}
 		case msg.String() == "$":
@@ -1486,7 +1635,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case msg.String() == "s":
 		if m.cfg.ValidateRef(m.selRef) == nil {
-			return m, m.sshExecCmd(false)
+			return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
 		}
 	case msg.String() == "A":
 		m.openActionMenu(modeDetail)
@@ -1654,29 +1803,11 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "ssh":
-				return m, m.sshExecCmd(false)
+				return m.beginInteractiveSSH(modeActionMenu, postWildConnectSSH)
 			case "sftp":
-				return m, m.sshExecCmd(true)
+				return m.beginInteractiveSSH(modeActionMenu, postWildConnectSFTP)
 			case "copy":
-				alias, ok := sshConnectAlias(m.cfg.HostAt(m.selRef))
-				if !ok {
-					m.status = errStyle.Render("Need one non-wildcard Host pattern.")
-					return m, nil
-				}
-				cmd := "ssh " + alias
-				if err := clipboard.WriteAll(cmd); err != nil {
-					m.status = errStyle.Render(err.Error())
-				} else {
-					m.status = "Copied: " + cmd
-				}
-				m.mode = m.actionReturnMode
-				if m.mode == modeDetail {
-					m.layoutDetailPanes()
-					m.refreshDetailList()
-				} else if m.mode == modeTree {
-					m.layoutDetailPanes()
-				}
-				return m, nil
+				return m.beginInteractiveSSH(modeActionMenu, postWildCopyCmd)
 			}
 		}
 	}
@@ -1848,8 +1979,7 @@ func (m Model) View() string {
 		return m.viewAppConfigScreen()
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("sshui — "))
-	b.WriteString(m.path)
+	b.WriteString(m.titleBarLine())
 	if m.readOnly {
 		b.WriteString(readOnlyBannerStyle.Render(" [read-only merged Include]"))
 	}
@@ -1894,7 +2024,46 @@ func (m Model) View() string {
 		return b.String()
 
 	case modeConfirmDeleteHost, modeConfirmDeleteGroup:
-		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(m.status + "\n\n[y/N]")
+		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(m.status)
+		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
+		return b.String()
+
+	case modeSSHConnectPending:
+		body := fmt.Sprintf("Connecting to %s…\n\n", m.sshConnectPendingAlias)
+		if m.sshConnectPendingNote != "" {
+			body += statusStyle.Render(m.sshConnectPendingNote) + "\n\n"
+		}
+		body += statusStyle.Render("Esc — cancel")
+		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(body)
+		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
+		return b.String()
+
+	case modeSSHConnectWildcardInput:
+		var lines []string
+		if m.sshConnectPendingNote != "" {
+			lines = append(lines, statusStyle.Render(m.sshConnectPendingNote))
+		}
+		switch m.sshConnectWildKind {
+		case sshWildSuffixStar:
+			lines = append(lines, fmt.Sprintf("Host pattern %q ends with * — fixed part:", m.sshConnectWildPattern))
+			lines = append(lines, statusStyle.Render("Type the rest after this prefix, then Enter (Esc cancels)."))
+			prefix := titleStyle.Render(m.sshConnectWildPrefix)
+			inputLine := lipgloss.JoinHorizontal(lipgloss.Top, prefix, m.valueInput.View())
+			lines = append(lines, inputLine)
+		case sshWildPrefixStar:
+			lines = append(lines, fmt.Sprintf("Host pattern %q starts with * — fixed suffix:", m.sshConnectWildPattern))
+			lines = append(lines, statusStyle.Render("Type the part before the suffix, then Enter (Esc cancels)."))
+			suf := titleStyle.Render(m.sshConnectWildSuffix)
+			inputLine := lipgloss.JoinHorizontal(lipgloss.Top, m.valueInput.View(), suf)
+			lines = append(lines, inputLine)
+		default:
+			lines = append(lines, fmt.Sprintf("Host pattern %q needs a concrete hostname.", m.sshConnectWildPattern))
+			lines = append(lines, statusStyle.Render("Enter the name you pass to ssh, then Enter (Esc cancels)."))
+			lines = append(lines, m.valueInput.View())
+		}
+		lines = append(lines, "", statusStyle.Render("Enter — continue · Esc — cancel"))
+		boxBody := strings.Join(lines, "\n")
+		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(boxBody)
 		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
 		return b.String()
 
@@ -2007,7 +2176,7 @@ Browse (split view)
   enter     Open full editor (tabs, add/remove directives, …)
   /         Filter host list; ↑↓ or k/j move among matches (left pane shows selection); Enter applies filter and opens host detail (or focuses the right pane if already in detail)
   z         Collapse/expand group (when a group header row is selected)
-  A         Actions: ssh / sftp / copy command (host row)
+  A         Actions: ssh / sftp / copy (same rules as s: first pattern, wildcard prompt if needed, short gate)
   n         New host under (default)
   c         Create new empty group (also shown in the host list title)
   D         Delete group (when a group header row is selected)
@@ -2016,7 +2185,7 @@ Browse (split view)
   v         Raw $EDITOR buffer (SSH config buffer, not sshui settings)
   $         Open sshui app config (~/.config/sshui/config.toml) in $EDITOR
   &         View sshui app config in a read-only scrollable pane (esc/q close)
-  s         SSH to selected host (single non-wildcard Host pattern)
+  s         SSH: first Host pattern (warns if the stanza lists several). Wildcards → complete hostname (Esc aborts, Enter continues), then short “Connecting…” (Esc cancels ssh)
   w / r     Write (save) / reload
   W         Toggle Include view: merged read-only browse ↔ editable main file only (when file has Include)
   ?         Open this help (scroll with arrows / PgUp / PgDn / Space; Esc closes help only)
@@ -2038,7 +2207,7 @@ Host detail (split: tree | detail)
   t         Cycle tab: Overview → All directives → Connectivity
   i         Edit #@host metadata lines (multiline)
   A         Actions menu (ssh / sftp / copy)
-  s         SSH to this host (same as Actions → ssh)
+  s         Same SSH flow as browse s (first pattern, wildcard prompt if needed, short gate); Esc cancels where shown
   a / k     Add directive (picker: / to filter, enter to add selected keyword / custom key)
   e / d     Edit value / delete directive
   D         Duplicate host
