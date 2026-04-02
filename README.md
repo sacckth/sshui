@@ -1,103 +1,115 @@
 # sshui
 
-Repository: [github.com/sacckth/sshui](https://github.com/sacckth/sshui).
-
-Keyboard-driven TUI for editing a single OpenSSH client config file. Built with Go, Bubble Tea, and Bubbles.
-
-**Back up your config before relying on save** — the app rewrites the file with stable formatting.
-
-## Config resolution
-
-1. `--config`  
-2. `$SSH_CONFIG`  
-3. `ssh_config` in app settings (below)  
-4. `~/.ssh/config`
-
-## App settings (`~/.config/sshui/config.toml`)
-
-Optional TOML (macOS: `~/Library/Application Support/sshui/config.toml`). All keys optional.
-
-| Key | Purpose |
-|-----|---------|
-| `ssh_config` | Default SSH client config path |
-| `editor` | Shell command prefix for raw edit (e.g. `vim` or `code --wait`); runs as `sh -c '$editor $tmpfile'` |
-| `theme` | `default`, `warm`, or `muted` (Lip Gloss accents) |
-| `ssh_config_git_mirror` | After each successful save, write the same bytes here (e.g. `~/src/dotfiles/ssh/config`); parents are created; `0600` |
-
-Set `NO_COLOR=1` to disable ANSI colors in the TUI (pane backgrounds and list chrome are subdued).
-
-In the TUI, **`$`** opens this file in `$EDITOR` and **`&`** shows it in a read-only scroller (after editing, theme/editor/mirror settings reload when the editor exits).
-
-## Features
-
-- Split panes with distinct backgrounds, a vertical separator, and a footer rule; group headers use bold+italic styling; **`z`** folds a group when its header row is selected (filtering temporarily shows hosts under folded groups)
-- Split host detail: tree + Overview / all directives / Connectivity tabs; `tab` switches pane focus
-- sshclick-style `#@group:` / `#@desc:` / `#@info:` / `#@host:` (per-host comments before `Host`)
-- Actions menu (`A`): `ssh`, `sftp`, copy `ssh <alias>` (single non-wildcard pattern)
-- **`Include`:** If the opened file contains `Include`, sshui starts in **read-only merged** mode: it loads that file plus every matched include and shows extra `include:<filename>` groups so you can browse everything in one tree. **Saving is disabled** (one save could not update every file). Press **`W`** in the TUI to switch to a **writable** view of **only** the main file (included hosts are hidden); **`s`** still writes that path only. Press **`W`** again (no unsaved changes) or **`r`** (reload) to return to merged read-only browse if `Include` is still there. See **`?`** in the TUI for the full note.
-- Optional git/dotfiles mirror on save (`ssh_config_git_mirror`)
-- CLI: `list`, `show`, `dump` (`--json`, `--check`), `completion bash|zsh|fish`
-
-## Build
-
-```bash
-go build -o sshui ./cmd/sshui/
-```
-
-To install on your `PATH` (Go 1.17+): `go install github.com/sacckth/sshui/cmd/sshui@latest` (or the same path from a local clone).
-
-**Makefile:** run `make` or `make help` for targets (`build`, `test`, `dist`, `packages`, `tag-push`, …).
-
-Cross-compile: `make dist` (Darwin arm64 + Linux amd64).
-
-**Packages:** `make packages` builds a static **linux/amd64** binary and produces **`.deb`**, **`.rpm`**, and **`.apk`** under `dist/` (via [nfpm](https://github.com/goreleaser/nfpm)), plus **`sshui-<version>-linux-amd64.tar.gz`** and **`sshui-<version>-darwin-arm64.tar.gz`**. Override version with `make packages VERSION=1.0.0`. Requires Go only (nfpm is run with `go run`).
-
-### GitHub Releases (where builds appear)
-
-Official binaries are **not** uploaded by `make` alone; they show up under the repo’s **Releases** tab after CI runs.
-
-1. Set `version = "x.y.z"` in `cmd/sshui/main.go` and commit (this string must match the tag, see below).
-2. Push to `main` (or your default branch) so the commit is on GitHub.
-3. Run **`make tag-push`** (creates annotated tag `vx.y.z` and `git push origin vx.y.z`). Requires a clean working tree unless `ALLOW_DIRTY=1`.
-4. The [Release workflow](.github/workflows/release.yml) starts on **`push` of tags `v*`**. It checks that **`vx.y.z` without the `v`** equals `version` in `cmd/sshui/main.go`, runs tests, runs **`make packages`**, writes **`dist/SHA256SUMS`**, and publishes a **GitHub Release** with the `.deb`, `.rpm`, `.apk`, tarballs, and checksum file.
-
-If the workflow fails the version check, fix `main.go` or delete the bad tag and tag again. After success, open **[github.com/sacckth/sshui/releases](https://github.com/sacckth/sshui/releases)** and pick the new tag to download assets.
-
-## Run
-
-Examples assume `sshui` is on your `PATH` (after `go install`, a package install, or `cp`/`mv` from `go build -o sshui`).
-
-```bash
-sshui
-sshui --config /path/to/sshconfig
-sshui list
-sshui show myhost --json
-sshui dump --check
-```
-
-Press `?` in the TUI for keybindings.
-
-## Screenshots
-
-The images below are **illustrative** placeholders; they may not match every pixel of the current TUI. See **[docs/SCREENSHOTS.md](docs/SCREENSHOTS.md)** for how to capture **real** screenshots using the synthetic config.
-
-Try the live UI with the same demo file:
-
-```bash
-sshui --config "$(pwd)/docs/readme-demo.conf"
-```
+Keyboard-driven terminal UI for managing OpenSSH client configuration. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 ![Illustrative browse view](docs/screenshots/browse.png)
 
-![Illustrative detailed view](docs/screenshots/detail.png)
+## Install
 
-![Illustrative directive view](docs/screenshots/directive.png)
-
-![Illustrative filter view](docs/screenshots/filter.png)
-
-## Help
+**Go (1.25+):**
 
 ```bash
-sshui --help
-sshui completion bash  # pipe to your shell rc
+go install github.com/sacckth/sshui/cmd/sshui@latest
 ```
+
+**Linux packages** (`.deb`, `.rpm`, `.apk`) and **macOS/Linux tarballs** are available on the [Releases](https://github.com/sacckth/sshui/releases) page.
+
+**Build from source:**
+
+```bash
+git clone https://github.com/sacckth/sshui.git
+cd sshui
+make build    # or: go build -o sshui ./cmd/sshui/
+```
+
+## Quick start
+
+```bash
+sshui                              # opens ~/.config/sshui/ssh_hosts (default)
+sshui --config ~/.ssh/config       # open a specific file
+```
+
+Press `?` inside the TUI for the full keybinding reference.
+
+### Key bindings at a glance
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open host detail or password host detail |
+| `/` | Filter hosts |
+| `s` | SSH to selected host |
+| `B` | Cycle browse mode (merged / openssh / password) |
+| `n` / `c` | New host / new group |
+| `w` / `r` | Save / reload |
+| `v` | Raw editor (`$EDITOR`) |
+| `z` | Fold/unfold group |
+| `$` | Edit app settings in `$EDITOR` |
+| `?` | Help |
+| `q` | Quit |
+
+### CLI
+
+```bash
+sshui list                         # tab-separated host list
+sshui show myhost --json           # single host detail
+sshui dump --check                 # verify canonical format
+sshui completion zsh               # shell completions
+```
+
+## Configuration
+
+sshui uses three files, all optional and auto-created on first run:
+
+| File | Purpose |
+|------|---------|
+| `~/.config/sshui/config.toml` | App settings (theme, editor, paths, browse mode) |
+| `~/.config/sshui/ssh_hosts` | OpenSSH-format host definitions (primary edit target) |
+| `~/.config/sshui/password_hosts.toml` | Password overlay for SSH_ASKPASS-based auth |
+
+On first run, sshui creates a default `config.toml` and offers to import existing hosts from `~/.ssh/config`. An `Include` directive is automatically appended to your main ssh config so that `ssh <alias>` works from the shell without sshui.
+
+### Dual tree: main ssh_config + managed hosts
+
+When `ssh_config` in `config.toml` points to a different file than `ssh_hosts_path` (the default setup), the TUI shows both:
+
+- **🔒 unmanaged** -- read-only hosts from your main `~/.ssh/config`, shown in a dimmer color. Groups defined with `#@group:` metadata are preserved (shown with a 🔒 suffix).
+- **✏️  managed** -- editable hosts in `ssh_hosts` (the primary edit target).
+
+Hosts in the ssh_config section cannot be edited directly. To move a host into the managed file, select it, press `A` (Actions), then choose **Import**. sshui copies the host and prompts to remove it from the main file (default: yes).
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full settings reference and path resolution.
+
+### Password hosts
+
+Password-authenticated hosts are defined in `password_hosts.toml` and use `SSH_ASKPASS` for secret delivery -- no plaintext passwords in any config file. See [docs/ASKPASS.md](docs/ASKPASS.md) for integration recipes with `pass`, `gopass`, KeePassXC, `secret-tool`, and `age`.
+
+## Screenshots
+
+The images in this README are illustrative. To capture real screenshots with a safe demo config:
+
+```bash
+sshui --config docs/readme-demo.conf
+```
+
+See [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md) for details.
+
+![Host detail view](docs/screenshots/detail.png)
+
+![Filter view](docs/screenshots/filter.png)
+
+## Contributing
+
+```bash
+make test         # run the test suite
+make build        # compile
+go fmt ./...      # format
+go vet ./...      # lint
+```
+
+Architecture notes and coding conventions are in [AGENTS.md](AGENTS.md). The project uses standard Go tooling with no CGO dependencies.
+
+**Release process:** set `version` in `cmd/sshui/main.go`, commit, then `make tag-push`. CI builds packages and publishes to [Releases](https://github.com/sacckth/sshui/releases). See [docs/RELEASING.md](docs/RELEASING.md) for the full workflow.
+
+## License
+
+[BSD 3-Clause](LICENSE)

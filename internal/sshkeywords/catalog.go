@@ -1,7 +1,5 @@
 package sshkeywords
 
-import "strings"
-
 // Entry describes a client config keyword for picker/autocomplete (UX hints only).
 type Entry struct {
 	Name       string
@@ -97,29 +95,4 @@ var Catalog = []Entry{
 	{Name: "VerifyHostKeyDNS", Hint: "yes|no|ask"},
 	{Name: "VisualHostKey", Hint: "yes|no"},
 	{Name: "XAuthLocation", Hint: "path"},
-}
-
-// Names returns directive names for filtering.
-func Names() []string {
-	out := make([]string, len(Catalog))
-	for i := range Catalog {
-		out[i] = Catalog[i].Name
-	}
-	return out
-}
-
-// Filter returns catalog entries whose name contains q (case-insensitive).
-func Filter(q string) []Entry {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
-		return Catalog
-	}
-	var out []Entry
-	for _, e := range Catalog {
-		nl := strings.ToLower(e.Name)
-		if strings.Contains(nl, q) || strings.HasPrefix(nl, q) {
-			out = append(out, e)
-		}
-	}
-	return out
 }

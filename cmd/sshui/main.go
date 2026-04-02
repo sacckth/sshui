@@ -12,11 +12,12 @@ import (
 
 	"github.com/sacckth/sshui/internal/appcfg"
 	"github.com/sacckth/sshui/internal/config"
+	"github.com/sacckth/sshui/internal/overlay"
 	"github.com/sacckth/sshui/internal/tui"
 )
 
 var (
-	version   = "0.1.3"
+	version   = "0.2.0"
 	cfgPath   string
 	dumpJSON  bool
 	dumpCheck bool
@@ -104,16 +105,47 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("unexpected arguments: %v (use subcommands for non-TUI actions)", args)
 	}
-	ac, err := appcfg.Load()
-	if err != nil {
-		return err
-	}
-	path, err := resolveSSHConfigPath(cfgPath, &ac)
+
+	cfgTomlPath, cfgExists, err := appcfg.ConfigExists()
 	if err != nil {
 		return err
 	}
 
-	baseCfg, err := loadParsedConfig(path)
+	ac, err := appcfg.Load()
+	if err != nil {
+		return err
+	}
+
+	mainPath, err := resolveSSHConfigPath(cfgPath, &ac)
+	if err != nil {
+		return err
+	}
+
+	sshHostsPath, err := ac.ResolveSSHHostsPath()
+	if err != nil {
+		return fmt.Errorf("ssh_hosts_path: %w", err)
+	}
+
+	overlayPath, err := ac.ResolvePasswordOverlayPath()
+	if err != nil {
+		return fmt.Errorf("password_overlay_path: %w", err)
+	}
+
+	// When config.toml is missing the wizard will handle all setup.
+	// When it exists, ensure Include + load files normally.
+	wizardNeeded := !cfgExists
+	if cfgExists {
+		if err := config.EnsureSSHHostsFile(sshHostsPath); err != nil {
+			return fmt.Errorf("ensure ssh_hosts: %w", err)
+		}
+		if ac.Hosts.EnsureIncludeEnabled() && !config.IsSSHUIManaged(mainPath) {
+			if err := config.AppendInclude(mainPath, sshHostsPath); err != nil {
+				return fmt.Errorf("append Include: %w", err)
+			}
+		}
+	}
+
+	baseCfg, err := loadParsedConfig(sshHostsPath)
 	if err != nil {
 		return err
 	}
@@ -121,7 +153,20 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	displayCfg := baseCfg
 	readOnly := baseCfg.HasInclude
 	if readOnly {
-		displayCfg = config.MergeIncludes(path, baseCfg)
+		displayCfg = config.MergeIncludes(sshHostsPath, baseCfg)
+	}
+
+	var mainCfg *config.Config
+	if mainPath != sshHostsPath {
+		mainCfg, _ = loadParsedConfig(mainPath)
+		if mainCfg != nil {
+			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath)
+		}
+	}
+
+	ov, err := overlay.Load(overlayPath)
+	if err != nil {
+		return fmt.Errorf("load overlay: %w", err)
 	}
 
 	mirrorPath := ""
@@ -132,26 +177,24 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	appToml, err := appcfg.FilePath()
-	if err != nil {
-		return err
-	}
-
-	p := tui.InitProgram(displayCfg, path, tui.Options{
-		Theme:         ac.Theme,
-		Editor:        ac.Editor,
-		ReadOnly:      readOnly,
-		MirrorPath:    mirrorPath,
-		AppConfigPath: appToml,
+	p := tui.InitProgram(displayCfg, sshHostsPath, tui.Options{
+		Version:            version,
+		Theme:              ac.Theme,
+		Editor:             ac.Editor,
+		ReadOnly:           readOnly,
+		MirrorPath:         mirrorPath,
+		AppConfigPath:      cfgTomlPath,
+		SSHHostsPath:       sshHostsPath,
+		MainSSHConfigPath:  mainPath,
+		MainConfig:         mainCfg,
+		OverlayPath:        overlayPath,
+		Overlay:            ov,
+		BrowseMode:         ac.EffectiveBrowseMode(),
+		AppConfig:          &ac,
+		ExportWizardNeeded: wizardNeeded,
 	})
-	final, err := p.Run()
-	if err != nil {
-		return err
-	}
-	if final == nil {
-		return nil
-	}
-	return nil
+	_, err = p.Run()
+	return err
 }
 
 func runDump(cmd *cobra.Command, args []string) error {

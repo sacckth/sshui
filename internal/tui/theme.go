@@ -29,6 +29,16 @@ var groupHeaderNormalStyle lipgloss.Style
 var groupHeaderSelectedStyle lipgloss.Style
 var groupHeaderDimStyle lipgloss.Style
 
+// unmanagedGroupHeaderNormalStyle / unmanagedGroupHeaderSelectedStyle / unmanagedGroupHeaderDimStyle —
+// tree group rows for read-only hosts from the parent ssh_config (dimmer than managed).
+var unmanagedGroupHeaderNormalStyle lipgloss.Style
+var unmanagedGroupHeaderSelectedStyle lipgloss.Style
+var unmanagedGroupHeaderDimStyle lipgloss.Style
+
+// unmanagedHostNormalStyle / unmanagedHostDimStyle — host rows from the parent ssh_config.
+var unmanagedHostNormalStyle lipgloss.Style
+var unmanagedHostDimStyle lipgloss.Style
+
 // Pane chrome (disabled when NO_COLOR).
 var paneLeftStyle lipgloss.Style
 var paneRightStyle lipgloss.Style
@@ -131,6 +141,11 @@ func setGroupHeaderStyles(noColor bool, paneBG, fg, fgSelected lipgloss.Terminal
 		groupHeaderNormalStyle = lipgloss.NewStyle().Bold(true)
 		groupHeaderSelectedStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
 		groupHeaderDimStyle = lipgloss.NewStyle()
+		unmanagedGroupHeaderNormalStyle = lipgloss.NewStyle().Faint(true)
+		unmanagedGroupHeaderSelectedStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
+		unmanagedGroupHeaderDimStyle = lipgloss.NewStyle().Faint(true)
+		unmanagedHostNormalStyle = lipgloss.NewStyle().Faint(true)
+		unmanagedHostDimStyle = lipgloss.NewStyle().Faint(true)
 		return
 	}
 	groupHeaderNormalStyle = lipgloss.NewStyle().
@@ -147,6 +162,26 @@ func setGroupHeaderStyles(noColor bool, paneBG, fg, fgSelected lipgloss.Terminal
 		Bold(true).
 		Italic(true).
 		Foreground(lipgloss.Color("243")).
+		Background(paneBG)
+
+	unmanagedGroupHeaderNormalStyle = lipgloss.NewStyle().
+		Italic(true).
+		Foreground(lipgloss.Color("245")).
+		Background(paneBG)
+	unmanagedGroupHeaderSelectedStyle = lipgloss.NewStyle().
+		Bold(true).
+		Italic(true).
+		Foreground(lipgloss.Color("252")).
+		Background(paneBG)
+	unmanagedGroupHeaderDimStyle = lipgloss.NewStyle().
+		Italic(true).
+		Foreground(lipgloss.Color("240")).
+		Background(paneBG)
+	unmanagedHostNormalStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("245")).
+		Background(paneBG)
+	unmanagedHostDimStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
 		Background(paneBG)
 }
 

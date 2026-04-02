@@ -141,6 +141,68 @@ func expandTilde(s string) string {
 	return s
 }
 
+// StripBridgeIncludes returns a clone of cfg with HostBlocks removed whose
+// only directives are Include(s) that resolve to sshHostsAbs. This prevents
+// the "#sshui-managed / Include ssh_hosts" bridge stanza from appearing as a
+// visible host in the tree when displaying the parent ssh_config.
+func StripBridgeIncludes(cfg *Config, sshHostsAbs string) *Config {
+	if cfg == nil {
+		return nil
+	}
+	out := Clone(cfg)
+	target := strings.ToLower(sshHostsAbs)
+	out.DefaultHosts = filterBridgeBlocks(out.DefaultHosts, filepath.Dir(sshHostsAbs), target)
+	for gi := range out.Groups {
+		out.Groups[gi].Hosts = filterBridgeBlocks(out.Groups[gi].Hosts, filepath.Dir(sshHostsAbs), target)
+	}
+	return out
+}
+
+func filterBridgeBlocks(hosts []HostBlock, baseDir, targetLower string) []HostBlock {
+	var kept []HostBlock
+	for _, hb := range hosts {
+		if isBridgeBlock(hb, baseDir, targetLower) {
+			continue
+		}
+		kept = append(kept, hb)
+	}
+	return kept
+}
+
+func isBridgeBlock(hb HostBlock, baseDir, targetLower string) bool {
+	if len(hb.Directives) == 0 {
+		return false
+	}
+	for _, d := range hb.Directives {
+		if !strings.EqualFold(d.Key, "Include") {
+			return false
+		}
+		for _, f := range strings.Fields(d.Value) {
+			resolved := resolveIncludePattern(baseDir, f)
+			match := false
+			for _, r := range resolved {
+				if strings.ToLower(r) == targetLower {
+					match = true
+					break
+				}
+			}
+			if !match {
+				abs := expandTilde(f)
+				if !filepath.IsAbs(abs) {
+					abs = filepath.Join(baseDir, abs)
+				}
+				if ap, err := filepath.Abs(abs); err == nil && strings.ToLower(ap) == targetLower {
+					match = true
+				}
+			}
+			if !match {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func flattenHostBlocks(cfg *Config) []HostBlock {
 	var out []HostBlock
 	for i := range cfg.DefaultHosts {

@@ -35,4 +35,5 @@ type HostRef struct {
 	InDefault bool
 	GroupIdx  int // used when InDefault is false
 	HostIdx   int
+	FromMain  bool // true when the ref points into the parent ssh_config (read-only snapshot)
 }
