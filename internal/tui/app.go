@@ -1020,7 +1020,7 @@ func (m *Model) sshExecCmd() tea.Cmd {
 	if m.overlayData != nil {
 		if ph := m.overlayData.MatchHost(target); ph != nil {
 			args := buildPasswordSSHArgs(ph)
-			c := exec.Command("ssh", args...)
+			c := execSSHOnTTY("ssh", args...)
 			c.Env = append(os.Environ(), ph.AskpassEnv()...)
 			return tea.ExecProcess(c, func(err error) tea.Msg {
 				return shellProcDoneMsg{err: err}
@@ -1031,9 +1031,9 @@ func (m *Model) sshExecCmd() tea.Cmd {
 	sftp := m.sshConnectPendingSFTP
 	var c *exec.Cmd
 	if sftp {
-		c = exec.Command("sftp", target)
+		c = execSSHOnTTY("sftp", target)
 	} else {
-		c = exec.Command("ssh", target)
+		c = execSSHOnTTY("ssh", target)
 	}
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return shellProcDoneMsg{err: err}
