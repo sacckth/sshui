@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	version   = "0.2.1"
+	version   = "0.2.2"
 	cfgPath   string
 	dumpJSON  bool
 	dumpCheck bool
@@ -140,7 +140,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 		if ac.Hosts.EnsureIncludeEnabled() && !config.IsSSHUIManaged(mainPath) {
 			if err := config.AppendInclude(mainPath, sshHostsPath); err != nil {
-				return fmt.Errorf("append Include: %w", err)
+				return fmt.Errorf("managed Include in main ssh_config: %w", err)
 			}
 		}
 	}
