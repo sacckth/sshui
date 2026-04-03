@@ -33,7 +33,7 @@ func appendIncludes(baseDir string, cfg *Config, out *Config, visited map[string
 		for _, abs := range resolveIncludePattern(baseDir, pat) {
 			key := strings.ToLower(abs)
 			if visited[key] {
-				continue
+				continue // already loaded this file — breaks Include cycles
 			}
 			visited[key] = true
 			data, err := os.ReadFile(abs)
@@ -143,8 +143,8 @@ func expandTilde(s string) string {
 
 // StripBridgeIncludes returns a clone of cfg with HostBlocks removed whose
 // only directives are Include(s) that resolve to sshHostsAbs. This prevents
-// the "#sshui-managed / Include ssh_hosts" bridge stanza from appearing as a
-// visible host in the tree when displaying the parent ssh_config.
+// the sshui-managed Include bridge (file-scope Include or legacy Host * wrapper)
+// from appearing as a visible host in the tree when displaying the parent ssh_config.
 func StripBridgeIncludes(cfg *Config, sshHostsAbs string) *Config {
 	if cfg == nil {
 		return nil

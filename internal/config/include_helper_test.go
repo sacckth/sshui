@@ -11,8 +11,8 @@ func TestIsSSHUIManaged(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "config")
 
-	// File with marker.
-	content := "#sshui-managed\nHost *\n    Include /tmp/ssh_hosts\n\nHost foo\n  HostName bar\n"
+	// File with marker (modern top-level Include).
+	content := "#sshui-managed\nInclude /tmp/ssh_hosts\n\nHost foo\n  HostName bar\n"
 	if err := os.WriteFile(mainPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -57,14 +57,17 @@ func TestAppendInclude(t *testing.T) {
 	if !strings.Contains(content, "Include "+target) {
 		t.Fatalf("Include not found: %q", content)
 	}
-	if !strings.Contains(content, "Host *") {
-		t.Fatalf("Host * wrapper not found: %q", content)
+	if strings.Contains(content, "Host *") {
+		t.Fatalf("Host * wrapper should not be used: %q", content)
 	}
-	// Include should be at the end, after original content.
-	markerIdx := strings.Index(content, sshuiManagedMarker)
+	// Managed block must be first so IDEs and OpenSSH apply ssh_hosts before other stanzas.
+	if !strings.HasPrefix(strings.TrimLeft(content, "\ufeff"), sshuiManagedMarker+"\n") {
+		t.Fatalf("marker should be first non-empty line: %q", content)
+	}
 	hostIdx := strings.Index(content, "Host foo")
-	if markerIdx < hostIdx {
-		t.Fatalf("marker should be after original content: %q", content)
+	markerIdx := strings.Index(content, sshuiManagedMarker)
+	if hostIdx < markerIdx {
+		t.Fatalf("original Host should follow sshui block: %q", content)
 	}
 
 	// Backup should exist.
@@ -116,6 +119,66 @@ func TestAppendIncludeNewFile(t *testing.T) {
 	}
 	if !strings.Contains(content, "Include "+target) {
 		t.Fatalf("content: %q", content)
+	}
+}
+
+func TestAppendIncludeMigratesLegacyFooter(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "config")
+	target := filepath.Join(dir, "ssh_hosts")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := "Host foo\n  HostName bar\n\n" + sshuiManagedMarker + "\nHost *\n    Include " + target + "\n"
+	if err := os.WriteFile(mainPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AppendInclude(mainPath, target); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(mainPath)
+	content := string(data)
+	if strings.Contains(content, "Host *") {
+		t.Fatalf("legacy Host * should be removed: %q", content)
+	}
+	if !strings.HasPrefix(strings.TrimLeft(content, "\ufeff"), sshuiManagedMarker+"\n") {
+		t.Fatalf("expected managed block at top: %q", content)
+	}
+	if !strings.Contains(content, "Host foo") {
+		t.Fatalf("original host missing: %q", content)
+	}
+}
+
+func TestAppendIncludeRejectsIncludeCycle(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "config")
+	target := filepath.Join(dir, "ssh_hosts")
+
+	mainContent := "Host x\n  HostName y\n"
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// ssh_hosts pulls in the main config → would recurse once main also Includes ssh_hosts.
+	loop := "Include " + mainPath + "\n"
+	if err := os.WriteFile(target, []byte(loop), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AppendInclude(mainPath, target); err == nil {
+		t.Fatal("expected error for include cycle")
+	}
+}
+
+func TestAppendIncludeRejectsSamePath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "same")
+	if err := os.WriteFile(p, []byte("Host a\n  HostName b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendInclude(p, p); err == nil {
+		t.Fatal("expected error when main and target are the same file")
 	}
 }
 

@@ -29,17 +29,43 @@ func IsSSHUIManaged(mainPath string) bool {
 	return false
 }
 
-// AppendInclude backs up mainPath, then appends an Include directive for
-// targetAbs at the end of the file with the #sshui-managed marker.
-// No-op if the marker is already present.
+// AppendInclude backs up mainPath when it has content, ensures a top-of-file
+// sshui-managed block in the form:
+//
+//	#sshui-managed
+//	Include <targetAbs>
+//
+// OpenSSH accepts Include at file scope (preferred for IDE tooling); older
+// sshui releases used a Host * wrapper at the end of the file — those blocks
+// are stripped and replaced with this header when the file is updated.
+//
+// Returns an error if mainPath and targetAbs are the same file, or if
+// targetAbs (or any file it Includes) already references mainPath, which would
+// create a recursive Include chain once main lists targetAbs.
 func AppendInclude(mainPath, targetAbs string) error {
-	if IsSSHUIManaged(mainPath) {
-		return nil
+	mainAbs, err := filepath.Abs(mainPath)
+	if err != nil {
+		return fmt.Errorf("abs main config path: %w", err)
+	}
+	targAbs, err := filepath.Abs(targetAbs)
+	if err != nil {
+		return fmt.Errorf("abs ssh_hosts path: %w", err)
+	}
+	if strings.EqualFold(mainAbs, targAbs) {
+		return fmt.Errorf("main ssh_config and ssh_hosts are the same file")
+	}
+	if includeChainReaches(includeScanStart{path: targAbs, seek: mainAbs}, map[string]bool{}, 0) {
+		return fmt.Errorf("include cycle: %s already includes %s (remove that Include before linking)", targAbs, mainAbs)
 	}
 
 	data, err := os.ReadFile(mainPath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", mainPath, err)
+	}
+
+	body := string(data)
+	if leadingManagedIncludeOK(body, targAbs) {
+		return nil
 	}
 
 	if len(data) > 0 {
@@ -49,22 +75,142 @@ func AppendInclude(mainPath, targetAbs string) error {
 		}
 	}
 
-	footer := fmt.Sprintf("\n%s\nHost *\n    Include %s\n", sshuiManagedMarker, targetAbs)
-
-	var out []byte
-	if len(data) == 0 {
-		if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(mainPath), err)
-		}
-		out = []byte(fmt.Sprintf("%s\nHost *\n    Include %s\n", sshuiManagedMarker, targetAbs))
+	stripped := stripManagedIncludeBlocks(body)
+	stripped = strings.TrimLeft(stripped, " \t\r\n")
+	header := sshuiManagedMarker + "\nInclude " + targAbs + "\n"
+	var out string
+	if stripped == "" {
+		out = header + "\n"
 	} else {
-		s := string(data)
-		if !strings.HasSuffix(s, "\n") {
-			s += "\n"
+		out = header + "\n" + stripped
+		if !strings.HasSuffix(out, "\n") {
+			out += "\n"
 		}
-		out = []byte(s + footer)
 	}
-	return os.WriteFile(mainPath, out, 0o600)
+
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(mainPath), err)
+	}
+	return os.WriteFile(mainPath, []byte(out), 0o600)
+}
+
+type includeScanStart struct {
+	path string
+	seek string
+}
+
+// includeChainReaches performs a depth-first audit of Include directives
+// starting at path, returning true if any resolved include target is seek
+// (case-insensitive, absolute paths) or eventually includes it. visited
+// prevents infinite traversal on cycles within the include graph.
+func includeChainReaches(s includeScanStart, visited map[string]bool, depth int) bool {
+	if depth > maxIncludeDepth {
+		return false
+	}
+	ap, err := filepath.Abs(s.path)
+	if err != nil {
+		return false
+	}
+	key := strings.ToLower(ap)
+	seekLower := strings.ToLower(s.seek)
+	if key == seekLower {
+		return true
+	}
+	if visited[key] {
+		return false
+	}
+	visited[key] = true
+
+	data, err := os.ReadFile(ap)
+	if err != nil {
+		return false
+	}
+	cfg, err := Parse(strings.NewReader(string(data)))
+	if err != nil {
+		return false
+	}
+	baseDir := filepath.Dir(ap)
+	for _, pat := range collectIncludePatterns(cfg) {
+		for _, incAbs := range resolveIncludePattern(baseDir, pat) {
+			if includeChainReaches(includeScanStart{path: incAbs, seek: s.seek}, visited, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func leadingManagedIncludeOK(body string, targetAbs string) bool {
+	s := strings.TrimPrefix(body, "\ufeff")
+	s = strings.TrimLeft(s, " \t\r\n")
+	if !strings.HasPrefix(s, sshuiManagedMarker) {
+		return false
+	}
+	rest := strings.TrimLeft(s[len(sshuiManagedMarker):], " \t\r\n")
+	line, _, _ := strings.Cut(rest, "\n")
+	line = strings.TrimSpace(line)
+	fields := strings.Fields(line)
+	if len(fields) < 2 || !strings.EqualFold(fields[0], "Include") {
+		return false
+	}
+	incPath := strings.Join(fields[1:], " ")
+	return includePathsEquivalent(incPath, targetAbs)
+}
+
+func includePathsEquivalent(pathInFile, targetAbs string) bool {
+	pathInFile = strings.TrimSpace(pathInFile)
+	targetAbs, err := filepath.Abs(targetAbs)
+	if err != nil {
+		return false
+	}
+	base := filepath.Dir(targetAbs)
+	for _, r := range resolveIncludePattern(base, pathInFile) {
+		if ar, err := filepath.Abs(r); err == nil && strings.EqualFold(ar, targetAbs) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripManagedIncludeBlocks(content string) string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	i := 0
+	for i < len(lines) {
+		if strings.TrimSpace(lines[i]) != sshuiManagedMarker {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		i++
+		for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+			i++
+		}
+		if i >= len(lines) {
+			break
+		}
+		next := strings.TrimSpace(lines[i])
+		lower := strings.ToLower(next)
+		if strings.HasPrefix(lower, "include ") {
+			i++
+			continue
+		}
+		if strings.EqualFold(next, "Host *") {
+			i++
+			for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+				i++
+			}
+			if i < len(lines) {
+				dir := strings.TrimSpace(lines[i])
+				if strings.HasPrefix(strings.ToLower(dir), "include ") {
+					i++
+				}
+			}
+			continue
+		}
+		out = append(out, sshuiManagedMarker)
+	}
+	return strings.Join(out, "\n")
 }
 
 // StripHostBlocks removes all Host blocks and sshclick metadata comments
