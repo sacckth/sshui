@@ -142,18 +142,32 @@ func expandTilde(s string) string {
 }
 
 // StripBridgeIncludes returns a clone of cfg with HostBlocks removed whose
-// only directives are Include(s) that resolve to sshHostsAbs. This prevents
-// the sshui-managed Include bridge (file-scope Include or legacy Host * wrapper)
-// from appearing as a visible host in the tree when displaying the parent ssh_config.
-func StripBridgeIncludes(cfg *Config, sshHostsAbs string) *Config {
+// only directives are Include(s) that resolve to targetAbs (typically the
+// managed ssh_hosts path). resolveBaseDir is the directory used to resolve
+// relative Include patterns in cfg (the directory of the file cfg was parsed
+// from, usually filepath.Dir(main_ssh_config)). If resolveBaseDir is empty,
+// filepath.Dir(targetAbs) is used as a fallback.
+//
+// This prevents the sshui-managed Include bridge (file-scope Include or legacy
+// Host * wrapper) from appearing as a visible host in the tree, and is also
+// used when exporting hosts so Include-only stanzas that pull in the managed
+// file or the main config are not copied (recursion).
+func StripBridgeIncludes(cfg *Config, targetAbs string, resolveBaseDir string) *Config {
 	if cfg == nil {
 		return nil
 	}
+	if resolveBaseDir == "" {
+		resolveBaseDir = filepath.Dir(targetAbs)
+	}
+	absTarget, err := filepath.Abs(targetAbs)
+	if err != nil {
+		absTarget = targetAbs
+	}
 	out := Clone(cfg)
-	target := strings.ToLower(sshHostsAbs)
-	out.DefaultHosts = filterBridgeBlocks(out.DefaultHosts, filepath.Dir(sshHostsAbs), target)
+	target := strings.ToLower(absTarget)
+	out.DefaultHosts = filterBridgeBlocks(out.DefaultHosts, resolveBaseDir, target)
 	for gi := range out.Groups {
-		out.Groups[gi].Hosts = filterBridgeBlocks(out.Groups[gi].Hosts, filepath.Dir(sshHostsAbs), target)
+		out.Groups[gi].Hosts = filterBridgeBlocks(out.Groups[gi].Hosts, resolveBaseDir, target)
 	}
 	return out
 }

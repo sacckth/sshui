@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	version   = "0.2.2"
+	version   = "0.2.3"
 	cfgPath   string
 	dumpJSON  bool
 	dumpCheck bool
@@ -160,7 +160,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if mainPath != sshHostsPath {
 		mainCfg, _ = loadParsedConfig(mainPath)
 		if mainCfg != nil {
-			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath)
+			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath, filepath.Dir(mainPath))
 		}
 	}
 

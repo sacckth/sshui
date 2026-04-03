@@ -44,7 +44,7 @@ Reload: ReadFile + Parse both files (discards unsaved model)
 ```
 
 - **Parser** (`internal/config/parse.go`): Builds `DefaultHosts` + `Groups` with `#@group:`, `#@desc:`, `#@info:` on groups and `#@host:` lines attached to the **following** `Host` stanza (`HostBlock.HostComments`). Sets `HasInclude` if any `Include` directive appears. **`MergeIncludes`** (`include.go`) appends synthetic `include:<basename>` groups for merged browse when the TUI is read-only.
-- **`StripBridgeIncludes`** (`include.go`): Removes `HostBlock`s from the parent config whose only directives are `Include` pointing to the managed `ssh_hosts` path — prevents the sshui-managed bridge (top-level `Include` parses as a synthetic `Host *` block) from appearing as a fake host.
+- **`StripBridgeIncludes`** (`include.go`): Removes `HostBlock`s whose only directives are `Include` pointing at a given absolute file (managed `ssh_hosts` and/or the main `ssh_config` when exporting). Takes `resolveBaseDir` (usually `filepath.Dir(main_ssh_config)`) so relative `Include` patterns match OpenSSH resolution.
 - **Writer** (`internal/config/write.go`): Emits `Host` blocks and group banners; stable spacing; ends with newline.
 - **TUI** (`internal/tui/app.go` + `raweditor.go` + `theme.go`): Pointer receiver `*Model`; `Options` carries theme + default editor hint from appcfg.
 

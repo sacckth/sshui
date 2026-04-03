@@ -209,7 +209,8 @@ func TestExportHostsTo(t *testing.T) {
 		},
 	}
 
-	if err := ExportHostsTo(src, dst); err != nil {
+	mainCfgPath := filepath.Join(dir, "ssh_config")
+	if err := ExportHostsTo(src, dst, filepath.Dir(mainCfgPath)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,73 +224,57 @@ func TestExportHostsTo(t *testing.T) {
 	}
 }
 
-func TestStripHostBlocks(t *testing.T) {
+func TestExportHostsToStripsManagedIncludeBridge(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "config")
-
-	input := `# Global comment
-ServerAliveInterval 60
-
-#@group: servers
-#@desc: production
-#@host: the web server
-Host web1
-    HostName 10.0.0.1
-    User admin
-
-Host web2
-    HostName 10.0.0.2
-
-# Keep this comment
-Include /etc/ssh/ssh_config.d/*
-`
-	if err := os.WriteFile(p, []byte(input), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := StripHostBlocks(p); err != nil {
-		t.Fatal(err)
-	}
-
-	data, _ := os.ReadFile(p)
-	content := string(data)
-
-	if strings.Contains(content, "Host web1") {
-		t.Fatalf("Host web1 should be stripped: %q", content)
-	}
-	if strings.Contains(content, "Host web2") {
-		t.Fatalf("Host web2 should be stripped: %q", content)
-	}
-	if strings.Contains(content, "HostName 10.0.0.1") {
-		t.Fatalf("HostName directive should be stripped: %q", content)
-	}
-	if strings.Contains(content, "#@group:") {
-		t.Fatalf("sshclick metadata should be stripped: %q", content)
-	}
-	if strings.Contains(content, "#@host:") {
-		t.Fatalf("sshclick host comment should be stripped: %q", content)
-	}
-	if !strings.Contains(content, "# Global comment") {
-		t.Fatalf("global comment should remain: %q", content)
-	}
-	if !strings.Contains(content, "ServerAliveInterval 60") {
-		t.Fatalf("global directive should remain: %q", content)
-	}
-	if !strings.Contains(content, "Include /etc/ssh/ssh_config.d/*") {
-		t.Fatalf("Include should remain: %q", content)
-	}
-	if !strings.Contains(content, "# Keep this comment") {
-		t.Fatalf("non-host comment should remain: %q", content)
-	}
-
-	// Backup should exist.
-	bkp := hiddenBackupPath(p)
-	bkpData, err := os.ReadFile(bkp)
+	dst, err := filepath.Abs(filepath.Join(dir, "ssh_hosts"))
 	if err != nil {
-		t.Fatal("backup missing:", err)
+		t.Fatal(err)
 	}
-	if string(bkpData) != input {
-		t.Fatalf("backup should match original")
+
+	cfg := &Config{
+		DefaultHosts: []HostBlock{
+			{Patterns: []string{"*"}, Directives: []Directive{{Key: "Include", Value: dst}}},
+			{Patterns: []string{"real"}, Directives: []Directive{{Key: "HostName", Value: "x.example.com"}}},
+		},
+	}
+	if err := ExportHostsTo(cfg, dst, dir); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(dst)
+	s := string(data)
+	if strings.Contains(s, "Include") {
+		t.Fatalf("managed-file Include bridge should be omitted: %q", s)
+	}
+	if !strings.Contains(s, "Host real") || !strings.Contains(s, "x.example.com") {
+		t.Fatalf("expected real host only: %q", s)
+	}
+}
+
+func TestReplaceMainSSHConfigWithManagedInclude(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "config")
+	target := filepath.Join(dir, "ssh_hosts")
+	os.WriteFile(target, nil, 0o600)
+	orig := "Host x\n  HostName y\n"
+	os.WriteFile(mainPath, []byte(orig), 0o644)
+
+	if err := ReplaceMainSSHConfigWithManagedInclude(mainPath, target); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(mainPath)
+	content := string(data)
+	if strings.Contains(content, "Host x") {
+		t.Fatalf("main config should be replaced: %q", content)
+	}
+	if !strings.HasPrefix(strings.TrimLeft(content, "\ufeff"), sshuiManagedMarker+"\n") {
+		t.Fatalf("expected only managed block: %q", content)
+	}
+	if !strings.Contains(content, "Include") {
+		t.Fatal("expected Include line")
+	}
+	bkp, _ := os.ReadFile(hiddenBackupPath(mainPath))
+	if string(bkp) != orig {
+		t.Fatalf("backup mismatch")
 	}
 }
 
@@ -309,7 +294,7 @@ func TestStripBridgeIncludes(t *testing.T) {
 			}},
 		},
 	}
-	out := StripBridgeIncludes(cfg, sshHosts)
+	out := StripBridgeIncludes(cfg, sshHosts, dir)
 	if len(out.DefaultHosts) != 1 {
 		t.Fatalf("expected 1 default host after strip, got %d", len(out.DefaultHosts))
 	}
@@ -330,30 +315,14 @@ func TestStripBridgeIncludesKeepsNonBridge(t *testing.T) {
 			}},
 		},
 	}
-	out := StripBridgeIncludes(cfg, "/tmp/ssh_hosts")
+	out := StripBridgeIncludes(cfg, "/tmp/ssh_hosts", "/tmp")
 	if len(out.DefaultHosts) != 1 {
 		t.Fatal("host with mixed directives should be kept")
 	}
 }
 
 func TestStripBridgeIncludesNil(t *testing.T) {
-	if StripBridgeIncludes(nil, "/tmp/ssh_hosts") != nil {
+	if StripBridgeIncludes(nil, "/tmp/ssh_hosts", "") != nil {
 		t.Fatal("nil cfg should return nil")
-	}
-}
-
-func TestStripHostBlocksMissingFile(t *testing.T) {
-	err := StripHostBlocks(filepath.Join(t.TempDir(), "nope"))
-	if err != nil {
-		t.Fatalf("missing file should be a no-op, got: %v", err)
-	}
-}
-
-func TestStripHostBlocksEmpty(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "config")
-	os.WriteFile(p, []byte(""), 0o644)
-	if err := StripHostBlocks(p); err != nil {
-		t.Fatal(err)
 	}
 }

@@ -1185,7 +1185,8 @@ func (m *Model) reloadMainCfg() {
 		m.mainCfg = nil
 		return
 	}
-	m.mainCfg = scfg.StripBridgeIncludes(parsed, m.sshHostsPath)
+	baseDir := filepath.Dir(m.mainSSHConfigPath)
+	m.mainCfg = scfg.StripBridgeIncludes(parsed, m.sshHostsPath, baseDir)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -3233,25 +3234,29 @@ func (m *Model) wizardFinish(copyHosts bool) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	mainRewritten := false
 	if copyHosts {
 		data := m.readMainConfig()
 		if data != "" {
 			mainCfg, err := scfg.Parse(strings.NewReader(data))
 			if err != nil {
 				m.status = errStyle.Render("Parse main config: " + err.Error())
-			} else if err := scfg.ExportHostsTo(mainCfg, m.sshHostsPath); err != nil {
+			} else if err := scfg.ExportHostsTo(mainCfg, m.sshHostsPath, filepath.Dir(m.mainSSHConfigPath)); err != nil {
 				m.status = errStyle.Render("Export hosts: " + err.Error())
-			} else if err := scfg.StripHostBlocks(m.mainSSHConfigPath); err != nil {
-				m.status = errStyle.Render("Strip hosts: " + err.Error())
+			} else if err := scfg.ReplaceMainSSHConfigWithManagedInclude(m.mainSSHConfigPath, m.sshHostsPath); err != nil {
+				m.status = errStyle.Render("Rewrite main ssh_config: " + err.Error())
 			} else {
 				m.status = "Hosts moved from " + m.mainSSHConfigPath
+				mainRewritten = true
 			}
 		}
 	}
 
-	if err := scfg.AppendInclude(m.mainSSHConfigPath, m.sshHostsPath); err != nil {
-		if m.status == "" {
-			m.status = errStyle.Render("Include: " + err.Error())
+	if !mainRewritten {
+		if err := scfg.AppendInclude(m.mainSSHConfigPath, m.sshHostsPath); err != nil {
+			if m.status == "" {
+				m.status = errStyle.Render("Include: " + err.Error())
+			}
 		}
 	}
 

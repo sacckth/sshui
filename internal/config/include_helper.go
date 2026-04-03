@@ -29,6 +29,26 @@ func IsSSHUIManaged(mainPath string) bool {
 	return false
 }
 
+// validateManagedLink checks that mainPath and targetAbs can be linked without
+// same-file or Include-cycle issues. Returns absolute paths.
+func validateManagedLink(mainPath, targetAbs string) (mainAbs, targAbs string, err error) {
+	mainAbs, err = filepath.Abs(mainPath)
+	if err != nil {
+		return "", "", fmt.Errorf("abs main config path: %w", err)
+	}
+	targAbs, err = filepath.Abs(targetAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("abs ssh_hosts path: %w", err)
+	}
+	if strings.EqualFold(mainAbs, targAbs) {
+		return "", "", fmt.Errorf("main ssh_config and ssh_hosts are the same file")
+	}
+	if includeChainReaches(includeScanStart{path: targAbs, seek: mainAbs}, map[string]bool{}, 0) {
+		return "", "", fmt.Errorf("include cycle: %s already includes %s (remove that Include before linking)", targAbs, mainAbs)
+	}
+	return mainAbs, targAbs, nil
+}
+
 // AppendInclude backs up mainPath when it has content, ensures a top-of-file
 // sshui-managed block in the form:
 //
@@ -43,19 +63,9 @@ func IsSSHUIManaged(mainPath string) bool {
 // targetAbs (or any file it Includes) already references mainPath, which would
 // create a recursive Include chain once main lists targetAbs.
 func AppendInclude(mainPath, targetAbs string) error {
-	mainAbs, err := filepath.Abs(mainPath)
+	_, targAbs, err := validateManagedLink(mainPath, targetAbs)
 	if err != nil {
-		return fmt.Errorf("abs main config path: %w", err)
-	}
-	targAbs, err := filepath.Abs(targetAbs)
-	if err != nil {
-		return fmt.Errorf("abs ssh_hosts path: %w", err)
-	}
-	if strings.EqualFold(mainAbs, targAbs) {
-		return fmt.Errorf("main ssh_config and ssh_hosts are the same file")
-	}
-	if includeChainReaches(includeScanStart{path: targAbs, seek: mainAbs}, map[string]bool{}, 0) {
-		return fmt.Errorf("include cycle: %s already includes %s (remove that Include before linking)", targAbs, mainAbs)
+		return err
 	}
 
 	data, err := os.ReadFile(mainPath)
@@ -88,6 +98,32 @@ func AppendInclude(mainPath, targetAbs string) error {
 		}
 	}
 
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(mainPath), err)
+	}
+	return os.WriteFile(mainPath, []byte(out), 0o600)
+}
+
+// ReplaceMainSSHConfigWithManagedInclude backs up mainPath if it exists and is
+// non-empty, then overwrites it with only the sshui-managed Include block for
+// targetAbs. Used when the setup wizard moves all hosts into the managed file
+// so the main config is a clean stub (no preserved comments or globals).
+func ReplaceMainSSHConfigWithManagedInclude(mainPath, targetAbs string) error {
+	_, targAbs, err := validateManagedLink(mainPath, targetAbs)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(mainPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", mainPath, err)
+	}
+	if len(data) > 0 {
+		bkp := hiddenBackupPath(mainPath)
+		if err := os.WriteFile(bkp, data, 0o600); err != nil {
+			return fmt.Errorf("backup %s: %w", bkp, err)
+		}
+	}
+	out := sshuiManagedMarker + "\nInclude " + targAbs + "\n\n"
 	if err := os.MkdirAll(filepath.Dir(mainPath), 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(mainPath), err)
 	}
@@ -213,85 +249,6 @@ func stripManagedIncludeBlocks(content string) string {
 	return strings.Join(out, "\n")
 }
 
-// StripHostBlocks removes all Host blocks and sshclick metadata comments
-// (#@group:, #@desc:, #@info:, #@host:) from the file at path.
-// Backs up before writing. Collapses runs of blank lines.
-func StripHostBlocks(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	if len(data) == 0 {
-		return nil
-	}
-
-	bkp := hiddenBackupPath(path)
-	if err := os.WriteFile(bkp, data, 0o600); err != nil {
-		return fmt.Errorf("backup %s: %w", bkp, err)
-	}
-
-	lines := strings.Split(string(data), "\n")
-	var kept []string
-	inHost := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-
-		if strings.HasPrefix(lower, "host ") && !strings.HasPrefix(lower, "hostname") {
-			inHost = true
-			continue
-		}
-
-		if inHost {
-			// Indented lines are directives belonging to the Host block.
-			if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-				continue
-			}
-			// Blank lines between/after directives are consumed.
-			if trimmed == "" {
-				continue
-			}
-			// Anything else (non-indented, non-empty) ends the block.
-			inHost = false
-		}
-
-		if isSshclickMeta(trimmed) {
-			continue
-		}
-
-		kept = append(kept, line)
-	}
-
-	// Collapse consecutive blank lines into at most one.
-	var final []string
-	prevBlank := false
-	for _, line := range kept {
-		blank := strings.TrimSpace(line) == ""
-		if blank && prevBlank {
-			continue
-		}
-		prevBlank = blank
-		final = append(final, line)
-	}
-
-	result := strings.Join(final, "\n")
-	result = strings.TrimRight(result, "\n") + "\n"
-	return os.WriteFile(path, []byte(result), 0o600)
-}
-
-func isSshclickMeta(trimmed string) bool {
-	for _, prefix := range []string{"#@group:", "#@desc:", "#@info:", "#@host:"} {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // EnsureSSHHostsFile creates ssh_hosts (0600) if it doesn't exist.
 func EnsureSSHHostsFile(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -303,12 +260,28 @@ func EnsureSSHHostsFile(path string) error {
 	return nil
 }
 
-// ExportHostsTo copies all Host blocks from src Config into the file at dstPath
-// (appending if it exists). Backs up dstPath first if it has content.
-func ExportHostsTo(src *Config, dstPath string) error {
+// ExportHostsTo serializes all Host blocks from src into dstPath (appending if
+// dstPath already has content). Backs up dstPath first if it has content.
+//
+// includeResolveBaseDir should be the directory of the file src was parsed from
+// (the main ssh_config), so relative Include patterns resolve correctly.
+// If empty, filepath.Dir(dstPath) is used.
+//
+// Include-only stanzas that resolve to dstPath (the managed file) are omitted
+// so the copy does not pull in the bridge stanza.
+func ExportHostsTo(src *Config, dstPath, includeResolveBaseDir string) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return err
 	}
+	managedAbs, err := filepath.Abs(dstPath)
+	if err != nil {
+		return fmt.Errorf("abs managed path: %w", err)
+	}
+	if includeResolveBaseDir == "" {
+		includeResolveBaseDir = filepath.Dir(managedAbs)
+	}
+	filtered := StripBridgeIncludes(src, managedAbs, includeResolveBaseDir)
+
 	existing, _ := os.ReadFile(dstPath)
 	if len(existing) > 0 {
 		bkp := hiddenBackupPath(dstPath)
@@ -317,7 +290,7 @@ func ExportHostsTo(src *Config, dstPath string) error {
 		}
 	}
 
-	serialized, err := String(src)
+	serialized, err := String(filtered)
 	if err != nil {
 		return fmt.Errorf("serialize hosts: %w", err)
 	}
