@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	version   = "0.2.4"
+	version   = "0.2.5"
 	cfgPath   string
 	dumpJSON  bool
 	dumpCheck bool
@@ -37,7 +37,7 @@ func main() {
 
 	dumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Print canonical serialized config to stdout",
+		Short: "Print canonical serialized managed config to stdout",
 		RunE:  runDump,
 	}
 	dumpCmd.Flags().BoolVar(&dumpJSON, "json", false, "emit JSON list of hosts (patterns + directives)")
@@ -45,7 +45,7 @@ func main() {
 
 	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List hosts (tab-separated: group, alias, hostname, user)",
+		Short: "List managed hosts from ssh_hosts (tab-separated: group, alias, hostname, user)",
 		RunE:  runList,
 	}
 
@@ -202,7 +202,7 @@ func runDump(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := resolveSSHConfigPath(cfgPath, &ac)
+	path, err := ac.ResolveSSHHostsPath()
 	if err != nil {
 		return err
 	}
@@ -268,7 +268,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := resolveSSHConfigPath(cfgPath, &ac)
+	path, err := ac.ResolveSSHHostsPath()
 	if err != nil {
 		return err
 	}
@@ -287,7 +287,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := resolveSSHConfigPath(cfgPath, &ac)
+	path, err := ac.ResolveSSHHostsPath()
 	if err != nil {
 		return err
 	}
