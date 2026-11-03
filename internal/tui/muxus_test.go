@@ -80,6 +80,43 @@ func TestActionMenuOpensMuxus(t *testing.T) {
 	}
 }
 
+func TestQuickKeyOpensMuxus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script as the fake muxus")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "muxus")
+	script := "#!/bin/sh\nprintf '%s ' \"$@\" > " + out + ".tmp && mv " + out + ".tmp " + out + "\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := New(mustParse(t, "Host edge-router\n    HostName 10.0.0.1\n"), "/nonexistent/ssh_hosts", Options{Muxus: fake})
+	for i, it := range m.hostList.Items() {
+		if _, ok := it.(hostRowEntry); ok {
+			m.hostList.Select(i)
+		}
+	}
+	m.actionReturnMode = modeDetail
+	m.Update(keyRunes("M"))
+	if m.mode != modeTree || !strings.Contains(m.status, "Opened in muxus") {
+		t.Fatalf("mode %v status %q", m.mode, m.status)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if got, err := os.ReadFile(out); err == nil {
+			if string(got) != "--host edge-router " {
+				t.Fatalf("muxus args %q", got)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake muxus was not run")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestResolveMuxusBinaryConfigured(t *testing.T) {
 	got, err := resolveMuxusBinary("/opt/Muxus/muxus")
 	if err != nil || got != "/opt/Muxus/muxus" {

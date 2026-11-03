@@ -2196,6 +2196,14 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.connectPasswordHost(pw.idx, modeTree)
 		}
 
+	case msg.String() == "M":
+		if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+			m.selRef = row.ref
+			if m.resolveValidateRef(m.selRef) == nil {
+				return m.quickMuxus(modeTree)
+			}
+		}
+
 	case msg.String() == "r":
 		return m, m.reloadFromDisk()
 
@@ -2424,6 +2432,13 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if pw, ok := m.hostList.SelectedItem().(passwordHostRowEntry); ok {
 				return m.connectPasswordHost(pw.idx, modeDetail)
 			}
+		case msg.String() == "M":
+			if row, ok := m.hostList.SelectedItem().(hostRowEntry); ok {
+				m.selRef = row.ref
+				if m.resolveValidateRef(m.selRef) == nil {
+					return m.quickMuxus(modeDetail)
+				}
+			}
 		case msg.String() == "$":
 			return m, m.openAppConfigEditor()
 		case msg.String() == "&":
@@ -2487,6 +2502,10 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "s":
 		if m.resolveValidateRef(m.selRef) == nil {
 			return m.beginInteractiveSSH(modeDetail, postWildConnectSSH)
+		}
+	case msg.String() == "M":
+		if m.resolveValidateRef(m.selRef) == nil {
+			return m.quickMuxus(modeDetail)
 		}
 	case msg.String() == "A":
 		m.openActionMenu(modeDetail)
@@ -3101,7 +3120,7 @@ func (m Model) View() string {
 			focus = "tree"
 		}
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"focus %s | tab | t tabs | W Include | p patterns | i meta | A actions | s ssh | a k add | e/enter d K J D g m o X | v w | $ cfg | & view cfg | z fold | esc tree%s%s",
+			"focus %s | tab | t tabs | W Include | p patterns | i meta | A actions | s ssh | M muxus | a k add | e/enter d K J D g m o X | v w | $ cfg | & view cfg | z fold | esc tree%s%s",
 			focus, m.editModeSuffix(), m.browseModeSuffix(),
 		)))
 		return b.String()
@@ -3139,7 +3158,7 @@ func (m Model) View() string {
 		b.WriteString(m.joinSplitPanes(left, right, ph, false))
 		b.WriteByte('\n')
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"enter editor | B browse | I setup | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | K J order | v raw | $ cfg | / filter | w r ? q%s%s",
+			"enter editor | B browse | I setup | W Include | A | s ssh | M muxus | n host | c group | z fold | D del grp | x host | g move | K J order | v raw | $ cfg | / filter | w r ? q%s%s",
 			m.editModeSuffix(), m.browseModeSuffix(),
 		)))
 		return b.String()
@@ -3686,6 +3705,7 @@ Browse (split view)
   v         Raw $EDITOR buffer
   $ / &     Edit / view sshui app config
   s         SSH connect (password hosts use SSH_ASKPASS overlay)
+  M         Open selected OpenSSH host in muxus (new tab)
   w / r     Write (save) / reload. Before saving, ssh -G parses the result; if it reports
             errors the save is refused once, and w again saves anyway
   W         Toggle Include view: merged read-only / editable main file only
@@ -3735,8 +3755,9 @@ Host detail (split: tree | detail)
             settings from ssh -G (saved files) and flags values an earlier block overrides
   p         Edit Host patterns (rename the alias)
   i         Edit #@host metadata lines (Alt+Enter / Ctrl+J for a new line)
-  A         Actions menu (ssh / sftp / copy / import)
+  A         Actions menu (ssh / sftp / copy / muxus / import)
   s         SSH connect
+  M         Open in muxus (new tab)
   a / k     Add directive (picker / custom key)
   e / enter Edit value of the selected directive
   d         Delete directive
