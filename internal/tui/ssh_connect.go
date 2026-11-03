@@ -24,6 +24,7 @@ const (
 	postWildConnectSSH
 	postWildConnectSFTP
 	postWildCopyCmd
+	postWildOpenMuxus
 )
 
 // sshConnectPlan describes how to connect for the first Host pattern on a block.

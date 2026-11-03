@@ -32,7 +32,9 @@ func Parse(r io.Reader) (*Config, error) {
 		return &cfg.Groups[len(cfg.Groups)-1]
 	}
 
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := sc.Text()
 		trimmed := strings.TrimSpace(line)
 
@@ -69,14 +71,13 @@ func Parse(r io.Reader) (*Config, error) {
 			continue
 		}
 
-		fields := splitFields(trimmed)
-		if len(fields) == 0 {
+		rawKey, value := splitKeyValue(trimmed)
+		if rawKey == "" {
 			continue
 		}
 
-		key := strings.ToLower(fields[0])
-		if key == "host" {
-			patterns := fields[1:]
+		if strings.EqualFold(rawKey, "host") {
+			patterns := splitFields(value)
 			if len(patterns) == 0 {
 				patterns = []string{""}
 			}
@@ -84,6 +85,7 @@ func Parse(r io.Reader) (*Config, error) {
 				HostComments: append([]string(nil), pendingHostMeta...),
 				Patterns:     patterns,
 				Directives:   nil,
+				SrcLine:      lineNo,
 			}
 			pendingHostMeta = nil
 			if currentGroup == nil {
@@ -103,11 +105,16 @@ func Parse(r io.Reader) (*Config, error) {
 				Directives:   nil,
 			}
 			pendingHostMeta = nil
-			cfg.DefaultHosts = append(cfg.DefaultHosts, hb)
-			currentHost = &cfg.DefaultHosts[len(cfg.DefaultHosts)-1]
+			if currentGroup == nil {
+				cfg.DefaultHosts = append(cfg.DefaultHosts, hb)
+				currentHost = &cfg.DefaultHosts[len(cfg.DefaultHosts)-1]
+			} else {
+				currentGroup.Hosts = append(currentGroup.Hosts, hb)
+				currentHost = &currentGroup.Hosts[len(currentGroup.Hosts)-1]
+			}
 		}
 
-		d := Directive{Key: fields[0], Value: strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))}
+		d := Directive{Key: rawKey, Value: value}
 		currentHost.Directives = append(currentHost.Directives, d)
 	}
 
@@ -118,11 +125,22 @@ func Parse(r io.Reader) (*Config, error) {
 }
 
 func isIncludeLine(trimmed string) bool {
-	fields := splitFields(trimmed)
-	if len(fields) == 0 {
-		return false
+	k, _ := splitKeyValue(trimmed)
+	return strings.EqualFold(k, "Include")
+}
+
+// splitKeyValue splits a config line into keyword and arguments. As in
+// ssh_config(5), the keyword is separated by whitespace and/or one "=".
+func splitKeyValue(trimmed string) (key, value string) {
+	i := strings.IndexFunc(trimmed, func(r rune) bool { return r == '=' || unicode.IsSpace(r) })
+	if i < 0 {
+		return trimmed, ""
 	}
-	return strings.EqualFold(fields[0], "Include")
+	rest := strings.TrimLeftFunc(trimmed[i:], unicode.IsSpace)
+	if strings.HasPrefix(rest, "=") {
+		rest = strings.TrimLeftFunc(rest[1:], unicode.IsSpace)
+	}
+	return trimmed[:i], strings.TrimSpace(rest)
 }
 
 type metaKind int

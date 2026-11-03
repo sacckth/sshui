@@ -111,6 +111,7 @@ type groupHeaderEntry struct {
 	groupIdx   int    // index into cfg.Groups when !defaultSec; -2 for password groups; -3 for unmanaged
 	pwGroup    string // non-empty for named password groups
 	unmanaged  bool   // true for read-only hosts from the parent ssh_config
+	mainGroup  int    // when unmanaged: index into mainCfg.Groups, or -1 for its default section
 }
 
 func (e groupHeaderEntry) Title() string {
@@ -532,6 +533,7 @@ func appendMainCfgSection(items []list.Item, mc *scfg.Config, totalWidth int, ig
 			defaultSec: false,
 			groupIdx:   -3,
 			unmanaged:  true,
+			mainGroup:  -1,
 		})
 		if !defCollapsed || ignoreCollapse {
 			n := len(mc.DefaultHosts)
@@ -557,6 +559,7 @@ func appendMainCfgSection(items []list.Item, mc *scfg.Config, totalWidth int, ig
 			defaultSec: false,
 			groupIdx:   -3,
 			unmanaged:  true,
+			mainGroup:  gi,
 		})
 		if collapsed && !ignoreCollapse {
 			continue

@@ -165,7 +165,7 @@ func includeChainReaches(s includeScanStart, visited map[string]bool, depth int)
 	if err != nil {
 		return false
 	}
-	baseDir := filepath.Dir(ap)
+	baseDir := includeBaseDir(filepath.Dir(ap))
 	for _, pat := range collectIncludePatterns(cfg) {
 		for _, incAbs := range resolveIncludePattern(baseDir, pat) {
 			if includeChainReaches(includeScanStart{path: incAbs, seek: s.seek}, visited, depth+1) {
@@ -199,7 +199,7 @@ func includePathsEquivalent(pathInFile, targetAbs string) bool {
 	if err != nil {
 		return false
 	}
-	base := filepath.Dir(targetAbs)
+	base := includeBaseDir(filepath.Dir(targetAbs))
 	for _, r := range resolveIncludePattern(base, pathInFile) {
 		if ar, err := filepath.Abs(r); err == nil && strings.EqualFold(ar, targetAbs) {
 			return true
@@ -263,9 +263,8 @@ func EnsureSSHHostsFile(path string) error {
 // ExportHostsTo serializes all Host blocks from src into dstPath (appending if
 // dstPath already has content). Backs up dstPath first if it has content.
 //
-// includeResolveBaseDir should be the directory of the file src was parsed from
-// (the main ssh_config), so relative Include patterns resolve correctly.
-// If empty, filepath.Dir(dstPath) is used.
+// includeResolveBaseDir is where relative Include patterns in src resolve
+// (normally UserIncludeBaseDir()). If empty, filepath.Dir(dstPath) is used.
 //
 // Include-only stanzas that resolve to dstPath (the managed file) are omitted
 // so the copy does not pull in the bridge stanza.

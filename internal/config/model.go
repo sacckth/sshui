@@ -12,6 +12,7 @@ type HostBlock struct {
 	HostComments []string
 	Patterns     []string
 	Directives   []Directive
+	SrcLine      int // 1-based line of the Host keyword in the parsed source; 0 if synthetic or created in memory
 }
 
 // Group is a logical section introduced by #@group: (sshclick-style metadata).

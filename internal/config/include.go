@@ -21,8 +21,26 @@ func MergeIncludes(mainAbs string, root *Config) *Config {
 	if ap, err := filepath.Abs(mainAbs); err == nil {
 		visited[strings.ToLower(ap)] = true
 	}
-	appendIncludes(filepath.Dir(mainAbs), root, out, visited, 0)
+	appendIncludes(includeBaseDir(filepath.Dir(mainAbs)), root, out, visited, 0)
 	return out
+}
+
+// UserIncludeBaseDir is where OpenSSH resolves relative Include paths found in a
+// user config file: ~/.ssh, whichever file (or nested include) contains them.
+// Returns "" if the home directory is unknown.
+func UserIncludeBaseDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".ssh")
+}
+
+func includeBaseDir(fallback string) string {
+	if d := UserIncludeBaseDir(); d != "" {
+		return d
+	}
+	return fallback
 }
 
 func appendIncludes(baseDir string, cfg *Config, out *Config, visited map[string]bool, depth int) {
@@ -52,7 +70,7 @@ func appendIncludes(baseDir string, cfg *Config, out *Config, visited map[string
 				Name:  "include:" + filepath.Base(abs),
 				Hosts: flat,
 			})
-			appendIncludes(filepath.Dir(abs), sub, out, visited, depth+1)
+			appendIncludes(baseDir, sub, out, visited, depth+1)
 		}
 	}
 }
@@ -144,9 +162,8 @@ func expandTilde(s string) string {
 // StripBridgeIncludes returns a clone of cfg with HostBlocks removed whose
 // only directives are Include(s) that resolve to targetAbs (typically the
 // managed ssh_hosts path). resolveBaseDir is the directory used to resolve
-// relative Include patterns in cfg (the directory of the file cfg was parsed
-// from, usually filepath.Dir(main_ssh_config)). If resolveBaseDir is empty,
-// filepath.Dir(targetAbs) is used as a fallback.
+// relative Include patterns in cfg (normally UserIncludeBaseDir()). If
+// resolveBaseDir is empty, filepath.Dir(targetAbs) is used as a fallback.
 //
 // This prevents the sshui-managed Include bridge (file-scope Include or legacy
 // Host * wrapper) from appearing as a visible host in the tree, and is also

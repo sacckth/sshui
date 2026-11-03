@@ -5,7 +5,7 @@ func Clone(cfg *Config) *Config {
 	if cfg == nil {
 		return nil
 	}
-	out := &Config{HasInclude: cfg.HasInclude}
+	out := &Config{HasInclude: cfg.HasInclude, DefaultHostsCollapsed: cfg.DefaultHostsCollapsed}
 	out.DefaultHosts = make([]HostBlock, len(cfg.DefaultHosts))
 	for i := range cfg.DefaultHosts {
 		out.DefaultHosts[i] = cloneHostBlock(cfg.DefaultHosts[i])
@@ -14,9 +14,10 @@ func Clone(cfg *Config) *Config {
 	for i := range cfg.Groups {
 		g := cfg.Groups[i]
 		ng := Group{
-			Name:         g.Name,
-			Descriptions: append([]string(nil), g.Descriptions...),
-			Hosts:        make([]HostBlock, len(g.Hosts)),
+			Name:               g.Name,
+			Descriptions:       append([]string(nil), g.Descriptions...),
+			Hosts:              make([]HostBlock, len(g.Hosts)),
+			CollapsedByDefault: g.CollapsedByDefault,
 		}
 		for j := range g.Hosts {
 			ng.Hosts[j] = cloneHostBlock(g.Hosts[j])
