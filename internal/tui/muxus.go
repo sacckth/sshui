@@ -82,6 +82,12 @@ func launchMuxus(bin string, args []string) error {
 	return nil
 }
 
+// quickMuxus is the M key: the action menu's muxus entry without the menu.
+func (m *Model) quickMuxus(returnMode viewMode) (*Model, tea.Cmd) {
+	m.actionReturnMode = returnMode
+	return m.beginInteractiveSSH(returnMode, postWildOpenMuxus)
+}
+
 // finishMuxusOpen launches muxus for target and returns to the screen the action menu came from.
 func (m *Model) finishMuxusOpen(target string, alias bool) (*Model, tea.Cmd) {
 	m.status = m.openInMuxus(target, alias)

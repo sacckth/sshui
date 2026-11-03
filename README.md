@@ -38,6 +38,7 @@ Press `?` inside the TUI for the full keybinding reference.
 | `enter` | Open host detail or password host detail; in host detail, edit the selected directive |
 | `/` | Filter hosts |
 | `s` | SSH to selected host |
+| `M` | Open selected host in [muxus](https://github.com/FloSch62/muxus) (new tab) |
 | `B` | Cycle browse mode (merged / openssh / password) |
 | `n` / `c` | New host (in the group under the cursor, then HostName/User/Port/IdentityFile prompts) / new group |
 | `p` | Rename host: edit its Host patterns (host detail) |
