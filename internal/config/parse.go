@@ -32,7 +32,9 @@ func Parse(r io.Reader) (*Config, error) {
 		return &cfg.Groups[len(cfg.Groups)-1]
 	}
 
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := sc.Text()
 		trimmed := strings.TrimSpace(line)
 
@@ -84,6 +86,7 @@ func Parse(r io.Reader) (*Config, error) {
 				HostComments: append([]string(nil), pendingHostMeta...),
 				Patterns:     patterns,
 				Directives:   nil,
+				SrcLine:      lineNo,
 			}
 			pendingHostMeta = nil
 			if currentGroup == nil {

@@ -27,6 +27,7 @@ func cloneHostBlock(h HostBlock) HostBlock {
 		HostComments: append([]string(nil), h.HostComments...),
 		Patterns:     append([]string(nil), h.Patterns...),
 		Directives:   make([]Directive, len(h.Directives)),
+		SrcLine:      h.SrcLine,
 	}
 	copy(out.Directives, h.Directives)
 	return out

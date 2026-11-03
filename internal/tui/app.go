@@ -76,6 +76,7 @@ const (
 	modePasswordDetailInput
 	modeLockConflict
 	modeConfirmImport // y/N: remove imported host from main ssh_config?
+	modeConfirmQuit   // y/N/w: quit with unsaved changes?
 )
 
 type detailTab int
@@ -1302,7 +1303,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeHelp:
 			if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
-				return m, tea.Quit
+				return m.requestQuit()
 			}
 			if key.Matches(msg, key.NewBinding(key.WithKeys("esc"))) {
 				m.mode = m.helpReturnMode
@@ -1601,8 +1602,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y", "enter":
 				if m.mainCfg != nil && m.mainCfg.ValidateRef(m.pendingImportRef) == nil {
-					m.mainCfg.DeleteHost(m.pendingImportRef)
-					if err := m.saveMainConfig(); err != nil {
+					if err := m.removeHostFromMainConfig(m.mainCfg.HostAt(m.pendingImportRef)); err != nil {
 						m.status = errStyle.Render("Remove from main: " + err.Error())
 					} else {
 						m.reloadMainCfg()
@@ -1623,6 +1623,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.syncTreeSelection()
 				m.refreshDetailList()
 				return m, rb
+			}
+			return m, nil
+
+		case modeConfirmQuit:
+			switch msg.String() {
+			case "y", "Y", "ctrl+c":
+				return m.requestQuit()
+			case "w":
+				if err := m.save(); err != nil {
+					m.status = errStyle.Render("Save: " + err.Error())
+					return m, nil
+				}
+				return m.requestQuit()
+			case "n", "N", "esc":
+				m.status = ""
+				m.mode = m.confirmReturnMode
+				m.layoutDetailPanes()
 			}
 			return m, nil
 
@@ -1953,9 +1970,9 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Always allow force-quit; otherwise let the list own keys while the filter prompt is open.
+	// ctrl+c always reaches requestQuit; otherwise let the list own keys while the filter prompt is open.
 	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	if m.hostList.SettingFilter() {
 		if tryFilterListArrowNav(&m.hostList, msg) {
@@ -1980,7 +1997,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("q", "Q"))):
-		return m, tea.Quit
+		return m.requestQuit()
 
 	case msg.String() == "z":
 		if gh, ok := m.hostList.SelectedItem().(groupHeaderEntry); ok {
@@ -2166,7 +2183,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	if msg.String() == "W" {
 		rb := m.toggleIncludeEditMode()
@@ -2437,7 +2454,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	if msg.String() == "esc" {
 		m.mode = m.actionReturnMode
@@ -2479,7 +2496,7 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c"))) {
-		return m, tea.Quit
+		return m.requestQuit()
 	}
 	if m.pickerList.SettingFilter() {
 		if tryFilterListArrowNav(&m.pickerList, msg) {
@@ -2717,7 +2734,7 @@ func (m Model) View() string {
 		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Top, framed, placeOpts...))
 		return b.String()
 
-	case modeConfirmDeleteHost, modeConfirmDeleteGroup, modeConfirmImport:
+	case modeConfirmDeleteHost, modeConfirmDeleteGroup, modeConfirmImport, modeConfirmQuit:
 		box := lipgloss.NewStyle().Border(panelBorder).Padding(1, 2).Width(min(56, m.width-4)).Render(m.status)
 		b.WriteString(lipgloss.Place(m.width, max(8, m.height-2), lipgloss.Center, lipgloss.Center, box))
 		return b.String()
@@ -3362,27 +3379,42 @@ func cloneHostBlockForImport(h scfg.HostBlock) scfg.HostBlock {
 	return out
 }
 
-// saveMainConfig writes the in-memory mainCfg to disk with a backup.
-func (m *Model) saveMainConfig() error {
-	if m.mainCfg == nil || m.mainSSHConfigPath == "" {
-		return fmt.Errorf("no main config to save")
+// requestQuit quits immediately when there are no unsaved changes; otherwise it
+// asks for confirmation (y or a second ctrl+c quits).
+func (m *Model) requestQuit() (tea.Model, tea.Cmd) {
+	if !m.dirty || m.mode == modeConfirmQuit {
+		m.exitEditMode()
+		return m, tea.Quit
 	}
-	out, err := scfg.String(m.mainCfg)
-	if err != nil {
-		return fmt.Errorf("serialize main config: %w", err)
+	m.confirmReturnMode = m.mode
+	m.mode = modeConfirmQuit
+	m.status = "Unsaved changes will be lost. Quit anyway? [y/N] (w saves first)"
+	return m, nil
+}
+
+// removeHostFromMainConfig cuts hb's stanza out of the main ssh_config text
+// (backup first). The rest of the file, including the sshui Include line,
+// comments and Match blocks, is left byte-for-byte unchanged.
+func (m *Model) removeHostFromMainConfig(hb *scfg.HostBlock) error {
+	if m.mainSSHConfigPath == "" {
+		return fmt.Errorf("no main config path")
 	}
-	body := []byte(out)
+	if hb.SrcLine == 0 {
+		return fmt.Errorf("directives outside any Host line cannot be removed automatically; edit %s by hand", m.mainSSHConfigPath)
+	}
 	prev, err := os.ReadFile(m.mainSSHConfigPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read main config for backup: %w", err)
+	if err != nil {
+		return fmt.Errorf("read main config: %w", err)
 	}
-	if err == nil {
-		bkp := hiddenBackupPath(m.mainSSHConfigPath)
-		if werr := os.WriteFile(bkp, prev, 0o600); werr != nil {
-			return fmt.Errorf("backup main config %s: %w", bkp, werr)
-		}
+	out, err := scfg.RemoveHostStanza(string(prev), hb.SrcLine, hb.Patterns)
+	if err != nil {
+		return err
 	}
-	return os.WriteFile(m.mainSSHConfigPath, body, 0o600)
+	bkp := hiddenBackupPath(m.mainSSHConfigPath)
+	if werr := os.WriteFile(bkp, prev, 0o600); werr != nil {
+		return fmt.Errorf("backup main config %s: %w", bkp, werr)
+	}
+	return os.WriteFile(m.mainSSHConfigPath, []byte(out), 0o600)
 }
 
 // browseModeSuffix returns a short string for the footer to indicate the current browse mode.
@@ -3426,7 +3458,7 @@ Browse (split view)
   W         Toggle Include view: merged read-only / editable main file only
   I         Re-run setup wizard (move hosts, Include, config.toml)
   ?         Open this help
-  q         Quit
+  q         Quit (asks first when there are unsaved changes; w saves and quits)
 
 Main ssh_config + managed ssh_hosts (dual tree)
   When config.toml sets ssh_config to a different file than ssh_hosts_path, the tree
