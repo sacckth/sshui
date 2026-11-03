@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	scfg "github.com/sacckth/sshui/internal/config"
+	"github.com/sacckth/sshui/internal/overlay"
 )
 
 func keyRunes(s string) tea.KeyMsg {
@@ -84,6 +85,75 @@ func TestHostMetaEditKeepsSeparateLines(t *testing.T) {
 	want := []string{"#@host: line one", "#@host: line two", "#@host: three"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("comments %q want %q", got, want)
+	}
+}
+
+func TestFoldMainGroupWithPrefixName(t *testing.T) {
+	main := mustParse(t, "#@group: prod\nHost a\n#@group: prod-eu\nHost b\n")
+	m := New(&scfg.Config{}, "/nonexistent/ssh_hosts", Options{MainConfig: main})
+	for _, it := range m.hostList.Items() {
+		if gh, ok := it.(groupHeaderEntry); ok && gh.label == "prod-eu 🔒" {
+			m.toggleFoldAt(gh)
+		}
+	}
+	if main.Groups[0].CollapsedByDefault || !main.Groups[1].CollapsedByDefault {
+		t.Fatalf("prod=%v prod-eu=%v", main.Groups[0].CollapsedByDefault, main.Groups[1].CollapsedByDefault)
+	}
+}
+
+func TestReloadRefreshesPreview(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh_hosts")
+	if err := os.WriteFile(path, []byte("Host a\n    HostName old.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := New(mustParse(t, "Host a\n    HostName old.example\n"), path, Options{})
+	m.refreshDetailList()
+	if err := os.WriteFile(path, []byte("Host a\n    HostName new.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.Update(keyRunes("r"))
+	it, ok := m.detailList.Items()[0].(dirEntry)
+	if !ok || it.d.Value != "new.example" {
+		t.Fatalf("preview not refreshed: %+v", m.detailList.Items())
+	}
+}
+
+func TestRawEditorErrorOrNoChangeKeepsModel(t *testing.T) {
+	cfg := mustParse(t, "Host a\n")
+	m := New(cfg, "/nonexistent/ssh_hosts", Options{})
+	orig, _ := scfg.String(cfg)
+	tmp := filepath.Join(t.TempDir(), "buf.conf")
+
+	_ = os.WriteFile(tmp, []byte("Host changed\n"), 0o600)
+	m.handleRawEditorFinished(rawEditorFinishedMsg{path: tmp, orig: orig, err: os.ErrInvalid})
+	if m.dirty || m.cfg != cfg {
+		t.Fatal("editor error must discard the buffer")
+	}
+
+	_ = os.WriteFile(tmp, []byte(orig), 0o600)
+	m.handleRawEditorFinished(rawEditorFinishedMsg{path: tmp, orig: orig})
+	if m.dirty || m.cfg != cfg {
+		t.Fatal("unchanged buffer must not mark dirty")
+	}
+
+	_ = os.WriteFile(tmp, []byte("Host changed\n"), 0o600)
+	m.handleRawEditorFinished(rawEditorFinishedMsg{path: tmp, orig: orig})
+	if !m.dirty || m.cfg.DefaultHosts[0].Patterns[0] != "changed" {
+		t.Fatal("edited buffer should replace the model")
+	}
+}
+
+func TestOpenSSHCommandHonorsSFTPWithOverlayMatch(t *testing.T) {
+	ov := &overlay.File{PasswordHosts: []overlay.PasswordHost{{Patterns: []string{"*"}, Hostname: "other", Askpass: "/bin/askpass"}}}
+	m := New(&scfg.Config{}, "/nonexistent/ssh_hosts", Options{Overlay: ov})
+	m.sshConnectPendingSFTP = true
+	c := m.openSSHCommand("box")
+	args := strings.Join(c.Args, " ")
+	if !strings.Contains(args, "sftp box") || strings.Contains(args, "other") {
+		t.Fatalf("args %q", args)
+	}
+	if !strings.Contains(strings.Join(c.Env, "\n"), "SSH_ASKPASS=/bin/askpass") {
+		t.Fatal("matching overlay should still provide SSH_ASKPASS")
 	}
 }
 

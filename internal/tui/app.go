@@ -141,6 +141,7 @@ type Model struct {
 	sshConnectPendingAlias     string
 	sshConnectPendingNote      string // e.g. multi-pattern warning on pending / wildcard screens
 	sshConnectPendingSFTP      bool
+	sshConnectPendingPwIdx     int // >=0: connecting overlay PasswordHosts[idx]; -1: OpenSSH alias
 	sshConnectWildKind         sshWildKind
 	sshConnectWildPrefix       string
 	sshConnectWildSuffix       string
@@ -232,16 +233,17 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		appConfigPath:      opts.AppConfigPath,
 		themeName:          opts.Theme,
 
-		browseMode:         browseMode,
-		overlayData:        opts.Overlay,
-		overlayPath:        opts.OverlayPath,
-		sshHostsPath:       opts.SSHHostsPath,
-		mainSSHConfigPath:  opts.MainSSHConfigPath,
-		mainCfg:            opts.MainConfig,
-		appConfig:          opts.AppConfig,
-		exportWizardNeeded: opts.ExportWizardNeeded,
-		pwSelIdx:           -1,
-		pendingDeletePwIdx: -1,
+		browseMode:             browseMode,
+		overlayData:            opts.Overlay,
+		overlayPath:            opts.OverlayPath,
+		sshHostsPath:           opts.SSHHostsPath,
+		mainSSHConfigPath:      opts.MainSSHConfigPath,
+		mainCfg:                opts.MainConfig,
+		appConfig:              opts.AppConfig,
+		exportWizardNeeded:     opts.ExportWizardNeeded,
+		pwSelIdx:               -1,
+		pendingDeletePwIdx:     -1,
+		sshConnectPendingPwIdx: -1,
 	}
 	lw := m.leftPaneWidth()
 	hostItems := buildHostItemsFiltered(cfg, m.overlayData, m.browseMode, lw, false, m.mainCfg)
@@ -820,16 +822,12 @@ func (m *Model) applyDetailListDelegateBG(d *list.DefaultDelegate) {
 }
 
 func (m *Model) toggleFoldAt(gh groupHeaderEntry) {
-	if gh.groupIdx == -3 && m.mainCfg != nil {
-		if strings.HasPrefix(gh.label, "🔒 unmanaged") {
+	if gh.unmanaged && m.mainCfg != nil {
+		if gh.mainGroup < 0 {
 			m.mainCfg.DefaultHostsCollapsed = !m.mainCfg.DefaultHostsCollapsed
-		} else {
-			for gi := range m.mainCfg.Groups {
-				if strings.HasPrefix(gh.label, m.mainCfg.Groups[gi].Name) {
-					m.mainCfg.Groups[gi].CollapsedByDefault = !m.mainCfg.Groups[gi].CollapsedByDefault
-					break
-				}
-			}
+		} else if gh.mainGroup < len(m.mainCfg.Groups) {
+			g := &m.mainCfg.Groups[gh.mainGroup]
+			g.CollapsedByDefault = !g.CollapsedByDefault
 		}
 		return
 	}
@@ -1026,28 +1024,37 @@ func (m *Model) sshExecCmd() tea.Cmd {
 		}
 	}
 
-	// Check if this target matches a password overlay host.
-	if m.overlayData != nil {
-		if ph := m.overlayData.MatchHost(target); ph != nil {
-			args := buildPasswordSSHArgs(ph)
-			c := execSSHOnTTY("ssh", args...)
-			c.Env = append(os.Environ(), ph.AskpassEnv()...)
-			return tea.ExecProcess(c, func(err error) tea.Msg {
-				return shellProcDoneMsg{err: err}
-			})
-		}
+	if i := m.sshConnectPendingPwIdx; i >= 0 && m.overlayData != nil && i < len(m.overlayData.PasswordHosts) {
+		ph := &m.overlayData.PasswordHosts[i]
+		c := execSSHOnTTY("ssh", buildPasswordSSHArgs(ph)...)
+		c.Env = append(os.Environ(), ph.AskpassEnv()...)
+		return tea.ExecProcess(c, func(err error) tea.Msg {
+			return shellProcDoneMsg{err: err}
+		})
 	}
 
-	sftp := m.sshConnectPendingSFTP
-	var c *exec.Cmd
-	if sftp {
-		c = execSSHOnTTY("sftp", target)
-	} else {
-		c = execSSHOnTTY("ssh", target)
-	}
+	c := m.openSSHCommand(target)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return shellProcDoneMsg{err: err}
 	})
+}
+
+// openSSHCommand runs ssh or sftp against an OpenSSH alias so its own directives
+// apply. A matching password-overlay pattern only contributes SSH_ASKPASS env.
+func (m *Model) openSSHCommand(target string) *exec.Cmd {
+	prog := "ssh"
+	if m.sshConnectPendingSFTP {
+		prog = "sftp"
+	}
+	c := execSSHOnTTY(prog, target)
+	if m.overlayData != nil {
+		if ph := m.overlayData.MatchHost(target); ph != nil {
+			if env := ph.AskpassEnv(); env != nil {
+				c.Env = append(os.Environ(), env...)
+			}
+		}
+	}
+	return c
 }
 
 // startSSHConnectPending shows a short gate before ssh/sftp; Esc cancels (tick still arrives but is ignored).
@@ -1057,6 +1064,7 @@ func (m *Model) startSSHConnectPending(returnMode viewMode, target, note string,
 	m.sshConnectPendingAlias = strings.TrimSpace(target)
 	m.sshConnectPendingNote = note
 	m.sshConnectPendingSFTP = sftp
+	m.sshConnectPendingPwIdx = -1
 	m.mode = modeSSHConnectPending
 	return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return sshConnectReadyMsg{} })
 }
@@ -1174,7 +1182,7 @@ func (m *Model) reloadFromDisk() tea.Cmd {
 	m.reloadMainCfg()
 	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
-	m.syncBrowsePreview()
+	m.resyncSelectionAfterStructureChange()
 	m.status = "Reloaded from disk."
 	return rb
 }
@@ -2999,6 +3007,7 @@ func (m *Model) connectPasswordHost(idx int, returnMode viewMode) (*Model, tea.C
 	m.sshConnectPendingAlias = target
 	m.sshConnectPendingNote = ""
 	m.sshConnectPendingSFTP = false
+	m.sshConnectPendingPwIdx = idx
 	m.mode = modeSSHConnectPending
 	return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return sshConnectReadyMsg{} })
 }

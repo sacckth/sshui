@@ -15,6 +15,7 @@ import (
 // rawEditorFinishedMsg is sent after $EDITOR (or configured editor) exits.
 type rawEditorFinishedMsg struct {
 	path string
+	orig string // buffer contents before editing
 	err  error
 }
 
@@ -66,19 +67,24 @@ func (m *Model) rawEditorCmd() tea.Cmd {
 	quoted := strconv.Quote(path)
 	c := exec.Command("sh", "-c", ed+" "+quoted)
 	return tea.ExecProcess(c, func(runErr error) tea.Msg {
-		return rawEditorFinishedMsg{path: path, err: runErr}
+		return rawEditorFinishedMsg{path: path, orig: s, err: runErr}
 	})
 }
 
 func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, tea.Cmd) {
 	defer func() { _ = os.Remove(msg.path) }()
 
+	if msg.err != nil {
+		m.status = errStyle.Render("Editor exited with an error; buffer discarded (" + msg.err.Error() + ").")
+		return m, nil
+	}
 	data, rerr := os.ReadFile(msg.path)
 	if rerr != nil {
 		m.status = errStyle.Render(fmt.Sprintf("read temp buffer: %v", rerr))
-		if msg.err != nil {
-			m.status += "\n" + errStyle.Render(msg.err.Error())
-		}
+		return m, nil
+	}
+	if string(data) == msg.orig {
+		m.status = "Editor buffer unchanged."
 		return m, nil
 	}
 
@@ -109,9 +115,6 @@ func (m *Model) handleRawEditorFinished(msg rawEditorFinishedMsg) (tea.Model, te
 		m.layoutDetailPanes()
 		m.refreshDetailList()
 	}
-	m.status = "Replaced in-memory config from editor buffer (save with s)."
-	if msg.err != nil {
-		m.status += " " + statusStyle.Render("(editor process: "+msg.err.Error()+")")
-	}
+	m.status = "Replaced in-memory config from editor buffer (save with w)."
 	return m, rb
 }
