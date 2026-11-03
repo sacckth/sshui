@@ -179,7 +179,8 @@ type Model struct {
 	newHostFields    []string
 	newHostPrompting bool // directive value input is one of the quick-field prompts
 
-	saveOverride string // serialized config the user chose to save despite ssh -G rejecting it
+	saveOverride string                       // serialized config the user chose to save despite ssh -G rejecting it
+	effective    map[string]effectiveSettings // ssh -G output by alias; reset when files on disk change
 }
 
 var (
@@ -788,6 +789,16 @@ func (m *Model) overviewPanel() string {
 	b.WriteString(fmt.Sprintf("User: %s\n", firstStr(directiveValue(h, "User", "user"), "—")))
 	b.WriteString(fmt.Sprintf("Port: %s\n", firstStr(directiveValue(h, "Port", "port"), "—")))
 	b.WriteString(fmt.Sprintf("IdentityFile: %s\n", firstStr(directiveValue(h, "IdentityFile", "identityfile"), "—")))
+	if lines := m.effectiveLines(h); len(lines) > 0 {
+		hdr := "Effective settings (ssh -G, from saved files)"
+		if m.dirty {
+			hdr += " — unsaved edits not included"
+		}
+		b.WriteString("\n" + statusStyle.Render(hdr) + "\n")
+		for _, l := range lines {
+			b.WriteString("  " + l + "\n")
+		}
+	}
 	return boxStyle.Render(strings.TrimSuffix(b.String(), "\n"))
 }
 
@@ -853,6 +864,11 @@ func (m *Model) toggleFoldAt(gh groupHeaderEntry) {
 
 func (m *Model) refreshDetailList() {
 	m.detailList = m.newDetailList()
+	if m.mode == modeDetail && m.detailTab == detailTabOverview && m.resolveValidateRef(m.selRef) == nil {
+		if plan := sshConnectPlanFromHost(m.resolveHostAt(m.selRef)); !plan.Invalid && !plan.NeedWildcard {
+			m.loadEffective(plan.DirectTarget)
+		}
+	}
 }
 
 // pickKwEntryAsNewDirective starts value input for a new directive chosen from the keyword picker.
@@ -935,7 +951,22 @@ func (m *Model) save() error {
 	}
 
 	m.dirty = false
+	m.effective = nil
 	return nil
+}
+
+// saveChecked is the interactive save (w): it first asks ssh -G to parse the
+// result and refuses once on errors; pressing w again with the same content saves anyway.
+func (m *Model) saveChecked() error {
+	if !m.readOnly {
+		if out, err := scfg.String(m.cfg); err == nil && out != m.saveOverride {
+			if verr := sshCheckConfig(out); verr != nil {
+				m.saveOverride = out
+				return fmt.Errorf("%v (press w again to save anyway)", verr)
+			}
+		}
+	}
+	return m.save()
 }
 
 // shellProcDoneMsg is sent after ssh/sftp subprocess exits (tea.ExecProcess).
@@ -1220,6 +1251,7 @@ func (m *Model) reloadFromDisk() tea.Cmd {
 		m.readOnly = false
 	}
 	m.dirty = false
+	m.effective = nil
 	m.reloadMainCfg()
 	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
@@ -1663,6 +1695,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.status = errStyle.Render("Remove from main: " + err.Error())
 					} else {
 						m.reloadMainCfg()
+						m.effective = nil
 						m.status = "Host imported and removed from main ssh_config."
 					}
 				}
@@ -1688,7 +1721,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "Y", "ctrl+c":
 				return m.requestQuit()
 			case "w":
-				if err := m.save(); err != nil {
+				if err := m.saveChecked(); err != nil {
 					m.status = errStyle.Render("Save: " + err.Error())
 					return m, nil
 				}
@@ -2111,7 +2144,7 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case msg.String() == "w":
-		if err := m.save(); err != nil {
+		if err := m.saveChecked(); err != nil {
 			m.status = errStyle.Render("Save: " + err.Error())
 		} else {
 			m.status = "Saved."
@@ -2341,7 +2374,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.rebuildHostList()
 			}
 		case msg.String() == "w":
-			if err := m.save(); err != nil {
+			if err := m.saveChecked(); err != nil {
 				m.status = errStyle.Render("Save: " + err.Error())
 			} else {
 				m.status = "Saved."
@@ -2411,7 +2444,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case msg.String() == "&":
 		return m.openAppConfigView(modeDetail)
 	case msg.String() == "w":
-		if err := m.save(); err != nil {
+		if err := m.saveChecked(); err != nil {
 			m.status = errStyle.Render("Save: " + err.Error())
 		} else {
 			m.status = "Saved."
@@ -3617,7 +3650,8 @@ Browse (split view)
   v         Raw $EDITOR buffer
   $ / &     Edit / view sshui app config
   s         SSH connect (password hosts use SSH_ASKPASS overlay)
-  w / r     Write (save) / reload
+  w / r     Write (save) / reload. Before saving, ssh -G parses the result; if it reports
+            errors the save is refused once, and w again saves anyway
   W         Toggle Include view: merged read-only / editable main file only
   I         Re-run setup wizard (move hosts, Include, config.toml)
   ?         Open this help
@@ -3661,7 +3695,8 @@ Include / read-only (merged view)
 
 Host detail (split: tree | detail)
   tab       Focus tree vs detail pane
-  t         Cycle tab: Overview > All > Connectivity
+  t         Cycle tab: Overview > All > Connectivity. Overview also shows the effective
+            settings from ssh -G (saved files) and flags values an earlier block overrides
   p         Edit Host patterns (rename the alias)
   i         Edit #@host metadata lines (Alt+Enter / Ctrl+J for a new line)
   A         Actions menu (ssh / sftp / copy / import)
