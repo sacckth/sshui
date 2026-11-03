@@ -68,6 +68,25 @@ func TestImportWithDeletePreservesMainConfig(t *testing.T) {
 	}
 }
 
+func TestHostMetaEditKeepsSeparateLines(t *testing.T) {
+	cfg := mustParse(t, "#@host: line one\n#@host: line two\nHost a\n    HostName a\n")
+	m := New(cfg, "/nonexistent/ssh_hosts", Options{})
+	m.openDetail(scfg.HostRef{InDefault: true, HostIdx: 0})
+	m.editMode = true
+	m.Update(keyRunes("i"))
+	if m.mode != modeInputHostMeta {
+		t.Fatalf("mode %v", m.mode)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m.Update(keyRunes("three"))
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := cfg.DefaultHosts[0].HostComments
+	want := []string{"#@host: line one", "#@host: line two", "#@host: three"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("comments %q want %q", got, want)
+	}
+}
+
 func TestQuitAsksWhenDirty(t *testing.T) {
 	m := New(mustParse(t, "Host a\n"), "/nonexistent/ssh_hosts", Options{})
 	if _, cmd := m.Update(keyRunes("q")); !isQuit(cmd) {

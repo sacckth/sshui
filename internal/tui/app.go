@@ -12,6 +12,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -105,6 +106,7 @@ type Model struct {
 
 	valueInput textinput.Model
 	keyInput   textinput.Model
+	metaInput  textarea.Model // #@host lines (textinput would join them into one)
 
 	selRef                    scfg.HostRef
 	pendingDirectiveKey       string
@@ -201,6 +203,12 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 	ki.Width = 40
 	ki.Placeholder = "DirectiveKey (custom / future keywords)"
 
+	ta := textarea.New()
+	ta.ShowLineNumbers = false
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	ta.SetWidth(70)
+	ta.SetHeight(6)
+
 	browseMode := opts.BrowseMode
 	if browseMode == "" {
 		browseMode = appcfg.BrowseModeMerged
@@ -214,6 +222,7 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		height:             h,
 		valueInput:         ti,
 		keyInput:           ki,
+		metaInput:          ta,
 		editDirectiveIndex: -1,
 		editor:             opts.Editor,
 		readOnly:           opts.ReadOnly,
@@ -1673,6 +1682,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			if m.mode == modeInputCustomKey {
 				m.keyInput, cmd = m.keyInput.Update(msg)
+			} else if m.mode == modeInputHostMeta {
+				m.metaInput, cmd = m.metaInput.Update(msg)
 			} else {
 				m.valueInput, cmd = m.valueInput.Update(msg)
 			}
@@ -1946,7 +1957,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		return m, rb
 
 	case modeInputHostMeta:
-		lines := strings.Split(m.valueInput.Value(), "\n")
+		lines := strings.Split(m.metaInput.Value(), "\n")
 		var kept []string
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -2324,10 +2335,10 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.returnAfterInput = modeDetail
 		m.mode = modeInputHostMeta
 		h := m.resolveHostAt(m.selRef)
-		m.valueInput.SetValue(strings.Join(h.HostComments, "\n"))
-		m.valueInput.Placeholder = "lines (prefix # or plain text → #@host:)"
-		m.valueInput.Focus()
-		return m, textinput.Blink
+		m.metaInput.SetWidth(max(20, min(90, m.width-4)))
+		m.metaInput.SetValue(strings.Join(h.HostComments, "\n"))
+		m.metaInput.Placeholder = "one line each (prefix # or plain text → #@host:)"
+		return m, m.metaInput.Focus()
 	}
 
 	if m.detailTab == detailTabOverview {
@@ -2833,7 +2844,7 @@ func (m Model) View() string {
 		case modeInputGroupDesc:
 			b.WriteString(statusStyle.Render("Group #@desc line (empty clears), Esc cancel"))
 		case modeInputHostMeta:
-			b.WriteString(statusStyle.Render("Host #@host lines, Esc cancel"))
+			b.WriteString(statusStyle.Render("Host #@host lines · Enter save · Alt+Enter / Ctrl+J new line · Esc cancel"))
 		case modeInputNewPasswordHost:
 			b.WriteString(statusStyle.Render("New password host: hostname or IP first (patterns default to this) · Esc cancel"))
 		case modeInputNewPasswordGroup:
@@ -2847,7 +2858,11 @@ func (m Model) View() string {
 		if m.mode == modeInputDirectiveValue && m.pendingDirectiveKey != "" {
 			b.WriteString(fmt.Sprintf("Directive: %s\n", m.pendingDirectiveKey))
 		}
-		b.WriteString(m.valueInput.View())
+		if m.mode == modeInputHostMeta {
+			b.WriteString(m.metaInput.View())
+		} else {
+			b.WriteString(m.valueInput.View())
+		}
 		b.WriteByte('\n')
 		if m.status != "" {
 			b.WriteString(m.footerStatusRender())

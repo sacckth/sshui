@@ -19,9 +19,8 @@ func RemoveHostStanza(src string, hostLine int, patterns []string) (string, erro
 		return "", fmt.Errorf("host line %d out of range", hostLine)
 	}
 	idx := hostLine - 1
-	fields := splitFields(strings.TrimSpace(lines[idx]))
-	if len(fields) == 0 || !strings.EqualFold(fields[0], "host") ||
-		strings.Join(fields[1:], " ") != strings.Join(patterns, " ") {
+	k, v := splitKeyValue(strings.TrimSpace(lines[idx]))
+	if !strings.EqualFold(k, "host") || strings.Join(splitFields(v), " ") != strings.Join(patterns, " ") {
 		return "", fmt.Errorf("line %d is no longer \"Host %s\" (file changed on disk?)", hostLine, strings.Join(patterns, " "))
 	}
 
@@ -46,8 +45,7 @@ func RemoveHostStanza(src string, hostLine int, patterns []string) (string, erro
 			}
 			continue
 		}
-		f := splitFields(t)
-		if k := strings.ToLower(f[0]); k == "host" || k == "match" {
+		if k, _ := splitKeyValue(t); strings.EqualFold(k, "host") || strings.EqualFold(k, "match") {
 			break
 		}
 		end = j

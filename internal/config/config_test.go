@@ -219,6 +219,50 @@ func TestMergeIncludes(t *testing.T) {
 	}
 }
 
+func TestParseEqualsSyntax(t *testing.T) {
+	cfg, err := Parse(strings.NewReader("Host=foo bar\n  HostName=foo.example\n  User = u\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DefaultHosts) != 1 {
+		t.Fatalf("hosts: %+v", cfg.DefaultHosts)
+	}
+	h := cfg.DefaultHosts[0]
+	if strings.Join(h.Patterns, " ") != "foo bar" {
+		t.Fatalf("patterns %q", h.Patterns)
+	}
+	want := []Directive{{Key: "HostName", Value: "foo.example"}, {Key: "User", Value: "u"}}
+	if len(h.Directives) != 2 || h.Directives[0] != want[0] || h.Directives[1] != want[1] {
+		t.Fatalf("directives %+v", h.Directives)
+	}
+}
+
+func TestDirectiveAfterGroupBannerStaysInGroup(t *testing.T) {
+	raw := "Host a\n    User u\n\n#@group: g\nServerAliveInterval 30\nHost b\n    User v\n"
+	cfg, err := Parse(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DefaultHosts) != 1 || len(cfg.Groups) != 1 || len(cfg.Groups[0].Hosts) != 2 {
+		t.Fatalf("structure: default=%d groups=%+v", len(cfg.DefaultHosts), cfg.Groups)
+	}
+	out, _ := String(cfg)
+	if strings.Index(out, "ServerAliveInterval") < strings.Index(out, "#@group: g") {
+		t.Fatalf("directive moved above its group:\n%s", out)
+	}
+}
+
+func TestCloneKeepsFoldFlags(t *testing.T) {
+	cfg, err := Parse(strings.NewReader("#@default-fold: -\nHost a\n#@group: g\n#@fold: -\nHost b\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Clone(cfg)
+	if !c.DefaultHostsCollapsed || !c.Groups[0].CollapsedByDefault {
+		t.Fatalf("clone lost fold flags: default=%v group=%v", c.DefaultHostsCollapsed, c.Groups[0].CollapsedByDefault)
+	}
+}
+
 func TestIncludeFlag(t *testing.T) {
 	raw := `Include config.d/*
 Host x
