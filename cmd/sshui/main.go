@@ -160,7 +160,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if mainPath != sshHostsPath {
 		mainCfg, _ = loadParsedConfig(mainPath)
 		if mainCfg != nil {
-			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath, filepath.Dir(mainPath))
+			mainCfg = config.StripBridgeIncludes(mainCfg, sshHostsPath, config.UserIncludeBaseDir())
 		}
 	}
 

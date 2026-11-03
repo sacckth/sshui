@@ -1046,7 +1046,7 @@ func (m *Model) openSSHCommand(target string) *exec.Cmd {
 	if m.sshConnectPendingSFTP {
 		prog = "sftp"
 	}
-	c := execSSHOnTTY(prog, target)
+	c := execSSHOnTTY(prog, append(m.sshConfigArgs(), target)...)
 	if m.overlayData != nil {
 		if ph := m.overlayData.MatchHost(target); ph != nil {
 			if env := ph.AskpassEnv(); env != nil {
@@ -1057,8 +1057,40 @@ func (m *Model) openSSHCommand(target string) *exec.Cmd {
 	return c
 }
 
+// sshConfigArgs returns -F <main config> when it is not ~/.ssh/config, so ssh
+// resolves aliases from the same file sshui shows.
+func (m *Model) sshConfigArgs() []string {
+	p := m.mainSSHConfigPath
+	if p == "" {
+		return nil
+	}
+	if home, err := os.UserHomeDir(); err == nil && p == filepath.Join(home, ".ssh", "config") {
+		return nil
+	}
+	return []string{"-F", p}
+}
+
+// sshCopyCommand is the shell command placed on the clipboard by "copy".
+func (m *Model) sshCopyCommand(target string) string {
+	parts := []string{"ssh"}
+	for _, a := range append(m.sshConfigArgs(), strings.TrimSpace(target)) {
+		parts = append(parts, shellQuote(a))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\$`!*?[]{}()<>|&;#~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // startSSHConnectPending shows a short gate before ssh/sftp; Esc cancels (tick still arrives but is ignored).
 func (m *Model) startSSHConnectPending(returnMode viewMode, target, note string, sftp bool) (*Model, tea.Cmd) {
+	if m.dirty {
+		note = strings.TrimSpace(note + " Unsaved changes are not visible to ssh until you save (w).")
+	}
 	m.sshConnectReturnMode = returnMode
 	m.sshConnectPendingCancelled = false
 	m.sshConnectPendingAlias = strings.TrimSpace(target)
@@ -1124,7 +1156,7 @@ func (m *Model) submitSSHWildcardConnect() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) finishSSHCopy(target string) (*Model, tea.Cmd) {
-	cmdStr := "ssh " + strings.TrimSpace(target)
+	cmdStr := m.sshCopyCommand(target)
 	if err := clipboard.WriteAll(cmdStr); err != nil {
 		m.status = errStyle.Render(err.Error())
 	} else {
@@ -1203,8 +1235,7 @@ func (m *Model) reloadMainCfg() {
 		m.mainCfg = nil
 		return
 	}
-	baseDir := filepath.Dir(m.mainSSHConfigPath)
-	m.mainCfg = scfg.StripBridgeIncludes(parsed, m.sshHostsPath, baseDir)
+	m.mainCfg = scfg.StripBridgeIncludes(parsed, m.sshHostsPath, scfg.UserIncludeBaseDir())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -3282,7 +3313,7 @@ func (m *Model) wizardFinish(copyHosts bool) (tea.Model, tea.Cmd) {
 			mainCfg, err := scfg.Parse(strings.NewReader(data))
 			if err != nil {
 				m.status = errStyle.Render("Parse main config: " + err.Error())
-			} else if err := scfg.ExportHostsTo(mainCfg, m.sshHostsPath, filepath.Dir(m.mainSSHConfigPath)); err != nil {
+			} else if err := scfg.ExportHostsTo(mainCfg, m.sshHostsPath, scfg.UserIncludeBaseDir()); err != nil {
 				m.status = errStyle.Render("Export hosts: " + err.Error())
 			} else if err := scfg.ReplaceMainSSHConfigWithManagedInclude(m.mainSSHConfigPath, m.sshHostsPath); err != nil {
 				m.status = errStyle.Render("Rewrite main ssh_config: " + err.Error())

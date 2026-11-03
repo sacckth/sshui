@@ -157,6 +157,23 @@ func TestOpenSSHCommandHonorsSFTPWithOverlayMatch(t *testing.T) {
 	}
 }
 
+func TestSSHConfigArgsForNonDefaultMainConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	m := New(&scfg.Config{}, "/x/ssh_hosts", Options{MainSSHConfigPath: filepath.Join(home, ".ssh", "config")})
+	if args := m.sshConfigArgs(); args != nil {
+		t.Fatalf("default config should not add -F: %v", args)
+	}
+	m.mainSSHConfigPath = "/work/my config"
+	c := m.openSSHCommand("box")
+	if !strings.HasSuffix(strings.Join(c.Args, " "), "ssh -F /work/my config box") {
+		t.Fatalf("args %q", c.Args)
+	}
+	if got := m.sshCopyCommand("box"); got != "ssh -F '/work/my config' box" {
+		t.Fatalf("copy command %q", got)
+	}
+}
+
 func TestQuitAsksWhenDirty(t *testing.T) {
 	m := New(mustParse(t, "Host a\n"), "/nonexistent/ssh_hosts", Options{})
 	if _, cmd := m.Update(keyRunes("q")); !isQuit(cmd) {

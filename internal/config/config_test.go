@@ -263,6 +263,35 @@ func TestCloneKeepsFoldFlags(t *testing.T) {
 	}
 }
 
+func TestMergeIncludesRelativeToUserSSHDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(filepath.Join(sshDir, "config.d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Nested relative includes also resolve against ~/.ssh, not the including file's directory.
+	if err := os.WriteFile(filepath.Join(sshDir, "config.d", "a.conf"), []byte("Include b.conf\nHost from-a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "b.conf"), []byte("Host from-b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hostsPath := filepath.Join(t.TempDir(), "ssh_hosts")
+	cfg, err := Parse(strings.NewReader("Include config.d/*.conf\nHost managed\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := MergeIncludes(hostsPath, cfg)
+	var names []string
+	for _, g := range merged.Groups {
+		names = append(names, g.Name)
+	}
+	if strings.Join(names, ",") != "include:a.conf,include:b.conf" {
+		t.Fatalf("include groups %v", names)
+	}
+}
+
 func TestIncludeFlag(t *testing.T) {
 	raw := `Include config.d/*
 Host x
