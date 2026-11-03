@@ -47,6 +47,8 @@ Order of precedence:
 3. `ssh_config` in `config.toml`
 4. `~/.ssh/config`
 
+This selects the **main** ssh_config shown read-only beside your managed hosts. The file sshui edits is always `ssh_hosts_path`. When the main config is not `~/.ssh/config`, sshui runs `ssh -F <main config>` so aliases resolve from the same file.
+
 ## File layout
 
 ```
@@ -63,7 +65,7 @@ Order of precedence:
 
 If `ensure_include` is `true` (default), sshui appends an `Include` directive pointing to `ssh_hosts` at the top of your main `~/.ssh/config` on startup, with a backup. This lets `ssh <alias>` work from the shell without sshui.
 
-If the opened file contains `Include`, sshui starts in **read-only merged mode**: it loads the main file plus every included file and shows them in one tree. Save is disabled because one write cannot safely update multiple files. Press `W` to switch to a writable view of only the main file. Press `W` again or `r` to return to merged browse.
+If the opened file contains `Include`, sshui starts in **read-only merged mode**: it loads the main file plus every included file and shows them in one tree. Save is disabled because one write cannot safely update multiple files. Press `W` to switch to a writable view of only the main file. Press `W` again or `r` to return to merged browse. As in OpenSSH, relative `Include` paths resolve under `~/.ssh`, whichever file contains them.
 
 ## Password overlay (`password_hosts.toml`)
 

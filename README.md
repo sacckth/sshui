@@ -26,7 +26,7 @@ make build    # or: go build -o sshui ./cmd/sshui/
 
 ```bash
 sshui                              # opens ~/.config/sshui/ssh_hosts (default)
-sshui --config ~/.ssh/config       # open a specific file
+sshui --config ~/work/ssh_config   # use a different main ssh_config (shown read-only beside ssh_hosts)
 ```
 
 Press `?` inside the TUI for the full keybinding reference.
@@ -35,17 +35,20 @@ Press `?` inside the TUI for the full keybinding reference.
 
 | Key | Action |
 |-----|--------|
-| `enter` | Open host detail or password host detail |
+| `enter` | Open host detail or password host detail; in host detail, edit the selected directive |
 | `/` | Filter hosts |
 | `s` | SSH to selected host |
 | `B` | Cycle browse mode (merged / openssh / password) |
-| `n` / `c` | New host / new group |
-| `w` / `r` | Save / reload |
+| `n` / `c` | New host (in the group under the cursor, then HostName/User/Port/IdentityFile prompts) / new group |
+| `p` | Rename host: edit its Host patterns (host detail) |
+| `K` / `J` | Move host (tree) or directive (host detail) up / down |
+| `t` | Cycle host detail tabs; Overview shows effective settings from `ssh -G` |
+| `w` / `r` | Save (checked with `ssh -G` first; `w` again saves anyway) / reload |
 | `v` | Raw editor (`$EDITOR`) |
 | `z` | Fold/unfold group |
 | `$` | Edit app settings in `$EDITOR` |
 | `?` | Help |
-| `q` | Quit |
+| `q` | Quit (asks first if there are unsaved changes) |
 
 ### CLI
 
@@ -75,7 +78,7 @@ When `ssh_config` in `config.toml` points to a different file than `ssh_hosts_pa
 - **🔒 unmanaged** -- read-only hosts from your main `~/.ssh/config`, shown in a dimmer color. Groups defined with `#@group:` metadata are preserved (shown with a 🔒 suffix).
 - **📝 managed** -- editable hosts in `ssh_hosts` (the primary edit target).
 
-Hosts in the ssh_config section cannot be edited directly. To move a host into the managed file, select it, press `A` (Actions), then choose **Import**. sshui copies the host and prompts to remove it from the main file (default: yes).
+Hosts in the ssh_config section cannot be edited directly. To move a host into the managed file, select it, press `A` (Actions), then choose **Import**. sshui copies the host and prompts to remove it from the main file (default: yes). Removal cuts only that host's lines; the rest of the main file (comments, `Include`, `Match`) is left as is, and a `.config.bkp` backup is written first.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full settings reference and path resolution.
 
