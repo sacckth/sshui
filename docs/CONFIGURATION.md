@@ -14,6 +14,7 @@ Created automatically on first run with sensible defaults. Edit with `$` in the 
 | `editor` | `$VISUAL` / `$EDITOR` / `vi` | Shell command for raw edit (`sh -c '$editor $tmpfile'`) |
 | `theme` | `default` | TUI theme: `default`, `warm`, or `muted` |
 | `ssh_config_git_mirror` | _(empty)_ | Copy saved config here after each save (e.g. `~/dotfiles/ssh/config`) |
+| `muxus` | `muxus` on `PATH`, then `/Applications/Muxus.app` (macOS) | [muxus](https://github.com/FloSch62/muxus) executable used by **Actions → muxus** (`muxus --host <alias>`, or `--connect <target>` for wildcard hosts). muxus reads `~/.ssh/config`, so the host must be reachable from there |
 
 ### `[hosts]` section
 

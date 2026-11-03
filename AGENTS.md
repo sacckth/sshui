@@ -78,10 +78,11 @@ When `MainSSHConfigPath ≠ ssh_hosts_path` and the main file is readable, the T
 2. **Save backup:** Before overwriting any file, its **previous** bytes are written to a hidden sibling file: `hiddenBackupPath` → `.<basename>.bkp` in the same directory (e.g. `~/.ssh/config` → `~/.ssh/.config.bkp`). Mode `0600`. If backup write fails, save aborts. Only one backup generation is kept.
 3. **New file:** If the config path does not exist yet, no backup is created; save creates the file.
 4. **Save check:** Interactive saves go through `saveChecked`: `ssh -G -F <tmp>` must accept the serialized file, otherwise the save is refused once and the same content saves on the next `w` (`saveOverride`). Missing `ssh` or a 3s timeout never blocks saving. Programmatic saves (import) call `save` directly.
-5. **Raw editor (`v`):** Serializes **in-memory** `*Config` to a temp file, runs `sh -c '$editor $quotedPath'` (editor from appcfg → `VISUAL` → `EDITOR` → `vi`), and replaces the model only if the editor exits 0 **and** the buffer changed (`tea.ExecProcess`).
-6. **Dirty flag:** Cleared on successful save and on reload from disk. All quit paths (`q`, ctrl+c) go through `requestQuit`, which asks when dirty (`y`/second ctrl+c quit, `w` saves then quits) and releases locks.
-7. **Main config hosts are read-only:** Mutations (delete, move, rename, edit directives, duplicate, reorder) are blocked on `FromMain` refs. The only way to adopt them is the Import action (A menu).
-8. **Edit mode and locks:** sshui starts read-only; the first mutation calls `enterEditMode`, which takes `.sshui.swp` locks on `ssh_hosts` and the overlay. Esc in host detail leaves edit mode (releases locks) before leaving the view.
+5. **External edits:** `Model.diskBaseline` holds the managed file's bytes as last loaded or saved. `save()` refuses when the file on disk differs (e.g. muxus edited it in place); a second `w` with the same on-disk bytes overwrites, and the backup keeps the other version. This check is independent of the `ssh -G` refusal, so both can ask for a second `w`. Any new path that reloads `m.cfg` from `m.path` must call `setDiskBaseline`.
+6. **Raw editor (`v`):** Serializes **in-memory** `*Config` to a temp file, runs `sh -c '$editor $quotedPath'` (editor from appcfg → `VISUAL` → `EDITOR` → `vi`), and replaces the model only if the editor exits 0 **and** the buffer changed (`tea.ExecProcess`).
+7. **Dirty flag:** Cleared on successful save and on reload from disk. All quit paths (`q`, ctrl+c) go through `requestQuit`, which asks when dirty (`y`/second ctrl+c quit, `w` saves then quits) and releases locks.
+8. **Main config hosts are read-only:** Mutations (delete, move, rename, edit directives, duplicate, reorder) are blocked on `FromMain` refs. The only way to adopt them is the Import action (A menu).
+9. **Edit mode and locks:** sshui starts read-only; the first mutation calls `enterEditMode`, which takes `.sshui.swp` locks on `ssh_hosts` and the overlay. Esc in host detail leaves edit mode (releases locks) before leaving the view.
 
 ## CLI and configuration precedence
 

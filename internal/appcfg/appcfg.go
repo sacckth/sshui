@@ -32,6 +32,7 @@ type Config struct {
 	Editor             string      `toml:"editor"`                // shell fragment, e.g. vim or `code --wait` (passed to sh -c)
 	Theme              string      `toml:"theme"`                 // default | warm | muted
 	SSHConfigGitMirror string      `toml:"ssh_config_git_mirror"` // optional: copy saved config here (e.g. dotfiles repo)
+	Muxus              string      `toml:"muxus"`                 // muxus executable path (default: muxus on PATH, then the macOS app bundle)
 	Hosts              HostsConfig `toml:"hosts"`
 }
 

@@ -181,6 +181,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		Version:            version,
 		Theme:              ac.Theme,
 		Editor:             ac.Editor,
+		Muxus:              ac.Muxus,
 		ReadOnly:           readOnly,
 		MirrorPath:         mirrorPath,
 		AppConfigPath:      cfgTomlPath,

@@ -20,6 +20,7 @@ const appConfigTemplate = `# sshui application settings (not OpenSSH client conf
 # editor = ""
 # theme = "default"
 # ssh_config_git_mirror = ""
+# muxus = ""
 `
 
 // appConfigEditorFinishedMsg is sent after $EDITOR exits on sshui config.toml.
@@ -82,6 +83,7 @@ func (m *Model) handleAppConfigEditorFinished(msg appConfigEditorFinishedMsg) (t
 	applyTheme(ac.Theme)
 	m.themeName = ac.Theme
 	m.editor = strings.TrimSpace(ac.Editor)
+	m.muxusPath = strings.TrimSpace(ac.Muxus)
 	mp, merr := mirrorPathFromAppCfg(&ac)
 	if merr != nil {
 		m.status = errStyle.Render("ssh_config_git_mirror: " + merr.Error())

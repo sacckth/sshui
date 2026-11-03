@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,7 @@ type Options struct {
 	Version       string
 	Theme         string
 	Editor        string
+	Muxus         string // muxus executable from app config; empty = auto-detect
 	ReadOnly      bool   // true: merged Include browse (see help); false: single-file editable
 	MirrorPath    string // optional: after save, copy bytes here (expanded abs path)
 	AppConfigPath string // absolute path to sshui config.toml (not SSH config)
@@ -114,6 +116,7 @@ type Model struct {
 	editDirectiveIndex        int // >=0 when editing value; -1 when adding
 	status                    string
 	editor                    string // from app config; VISUAL/EDITOR used when empty
+	muxusPath                 string // from app config; auto-detected when empty
 	confirmReturnMode         viewMode
 	returnAfterInput          viewMode
 	groupPickerReturnMode     viewMode
@@ -181,6 +184,12 @@ type Model struct {
 
 	saveOverride string                       // serialized config the user chose to save despite ssh -G rejecting it
 	effective    map[string]effectiveSettings // ssh -G output by alias; reset when files on disk change
+
+	// diskBaseline is m.path's content when m.cfg was loaded or last saved; save refuses
+	// to overwrite a file another tool (e.g. muxus) changed since, unless confirmed.
+	diskBaseline      []byte
+	diskConflict      []byte // on-disk content the user already confirmed overwriting
+	diskConflictAcked bool
 }
 
 var (
@@ -236,6 +245,7 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		metaInput:          ta,
 		editDirectiveIndex: -1,
 		editor:             opts.Editor,
+		muxusPath:          opts.Muxus,
 		readOnly:           opts.ReadOnly,
 		mirrorPath:         opts.MirrorPath,
 		detailTab:          detailTabAll,
@@ -254,6 +264,9 @@ func New(cfg *scfg.Config, path string, opts Options) *Model {
 		pwSelIdx:               -1,
 		pendingDeletePwIdx:     -1,
 		sshConnectPendingPwIdx: -1,
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		m.diskBaseline = data
 	}
 	lw := m.leftPaneWidth()
 	hostItems := buildHostItemsFiltered(cfg, m.overlayData, m.browseMode, lw, false, m.mainCfg)
@@ -428,6 +441,7 @@ func (m *Model) toggleIncludeEditMode() tea.Cmd {
 		m.cfg = cfg
 		m.readOnly = false
 		m.dirty = false
+		m.setDiskBaseline(data)
 		rb := m.rebuildHostList()
 		m.layoutDetailPanes()
 		m.resyncSelectionAfterStructureChange()
@@ -457,6 +471,7 @@ func (m *Model) toggleIncludeEditMode() tea.Cmd {
 		m.status = errStyle.Render("Include was removed on disk; staying in single-file view.")
 		m.cfg = cfg
 		m.readOnly = false
+		m.setDiskBaseline(data)
 		rb := m.rebuildHostList()
 		m.layoutDetailPanes()
 		m.resyncSelectionAfterStructureChange()
@@ -465,6 +480,7 @@ func (m *Model) toggleIncludeEditMode() tea.Cmd {
 	m.cfg = scfg.MergeIncludes(m.path, cfg)
 	m.readOnly = true
 	m.dirty = false
+	m.setDiskBaseline(data)
 	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
 	m.resyncSelectionAfterStructureChange()
@@ -929,6 +945,10 @@ func (m *Model) save() error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read existing file for backup: %w", err)
 	}
+	if !bytes.Equal(prev, m.diskBaseline) && !(m.diskConflictAcked && bytes.Equal(prev, m.diskConflict)) {
+		m.diskConflict, m.diskConflictAcked = prev, true
+		return fmt.Errorf("%s changed on disk since sshui loaded it (another tool such as muxus edited it). Press w again to overwrite (the other version goes to %s), or r to reload and drop your unsaved edits", m.path, hiddenBackupPath(m.path))
+	}
 	if err == nil {
 		bkp := hiddenBackupPath(m.path)
 		if werr := os.WriteFile(bkp, prev, 0o600); werr != nil {
@@ -939,6 +959,7 @@ func (m *Model) save() error {
 	if werr := os.WriteFile(m.path, body, 0o600); werr != nil {
 		return fmt.Errorf("write config: %w", werr)
 	}
+	m.setDiskBaseline(body)
 
 	if m.mirrorPath != "" {
 		parent := filepath.Dir(m.mirrorPath)
@@ -953,6 +974,12 @@ func (m *Model) save() error {
 	m.dirty = false
 	m.effective = nil
 	return nil
+}
+
+// setDiskBaseline records data as m.path's known content and clears any pending overwrite confirmation.
+func (m *Model) setDiskBaseline(data []byte) {
+	m.diskBaseline = data
+	m.diskConflict, m.diskConflictAcked = nil, false
 }
 
 // saveChecked is the interactive save (w): it first asks ssh -G to parse the
@@ -1031,6 +1058,7 @@ func (m *Model) openActionMenu(returnTo viewMode) {
 		actionItem{id: "ssh", desc: "SSH session (uses first Host pattern)"},
 		actionItem{id: "sftp", desc: "SFTP session"},
 		actionItem{id: "copy", desc: "Copy ssh command"},
+		actionItem{id: "muxus", desc: "Open in muxus (new tab)"},
 	}
 	if m.selRef.FromMain {
 		items = append(items, actionItem{id: "import", desc: "Import host to managed ssh_hosts file"})
@@ -1156,6 +1184,9 @@ func (m *Model) beginInteractiveSSH(returnMode viewMode, post sshPostWildKind) (
 	if post == postWildCopyCmd {
 		return m.finishSSHCopy(plan.DirectTarget)
 	}
+	if post == postWildOpenMuxus {
+		return m.finishMuxusOpen(plan.DirectTarget, true)
+	}
 	sftp := post == postWildConnectSFTP
 	return m.startSSHConnectPending(returnMode, plan.DirectTarget, note, sftp)
 }
@@ -1189,6 +1220,8 @@ func (m *Model) submitSSHWildcardConnect() (tea.Model, tea.Cmd) {
 		return m.startSSHConnectPending(m.sshConnectReturnMode, target, m.sshConnectPendingNote, false)
 	case postWildConnectSFTP:
 		return m.startSSHConnectPending(m.sshConnectReturnMode, target, m.sshConnectPendingNote, true)
+	case postWildOpenMuxus:
+		return m.finishMuxusOpen(target, false)
 	default:
 		m.status = errStyle.Render("Internal: unknown SSH action.")
 		return m, nil
@@ -1252,6 +1285,7 @@ func (m *Model) reloadFromDisk() tea.Cmd {
 	}
 	m.dirty = false
 	m.effective = nil
+	m.setDiskBaseline(data)
 	m.reloadMainCfg()
 	rb := m.rebuildHostList()
 	m.layoutDetailPanes()
@@ -2663,6 +2697,8 @@ func (m *Model) updateActionMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.beginInteractiveSSH(modeActionMenu, postWildConnectSFTP)
 			case "copy":
 				return m.beginInteractiveSSH(modeActionMenu, postWildCopyCmd)
+			case "muxus":
+				return m.beginInteractiveSSH(modeActionMenu, postWildOpenMuxus)
 			case "import":
 				return m.startImportFromMain()
 			}
@@ -3638,7 +3674,7 @@ Browse (split view)
   /         Filter host list
   z         Collapse/expand group
   B         Cycle browse mode: merged > openssh > password (persisted)
-  A         Actions: ssh / sftp / copy / import (on ssh_config hosts)
+  A         Actions: ssh / sftp / copy / muxus / import (on ssh_config hosts)
   n         New host (OpenSSH or password, depends on browse mode). OpenSSH hosts go into
             the group under the cursor, then prompt HostName, User, Port, IdentityFile
             (Enter skips a field, Esc stops)
