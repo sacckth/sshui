@@ -292,6 +292,36 @@ func TestMergeIncludesRelativeToUserSSHDir(t *testing.T) {
 	}
 }
 
+func TestAppendAndShiftHost(t *testing.T) {
+	cfg := &Config{Groups: []Group{{Name: "g"}}}
+	ref, err := cfg.AppendHost(false, 0, HostBlock{Patterns: []string{"a"}})
+	if err != nil || ref != (HostRef{GroupIdx: 0, HostIdx: 0}) {
+		t.Fatalf("ref %+v err %v", ref, err)
+	}
+	if _, err := cfg.AppendHost(false, 3, HostBlock{}); err == nil {
+		t.Fatal("expected invalid group error")
+	}
+	ref2, _ := cfg.AppendHost(false, 0, HostBlock{Patterns: []string{"b"}})
+	up, err := cfg.ShiftHost(ref2, -1)
+	if err != nil || up.HostIdx != 0 || cfg.Groups[0].Hosts[0].Patterns[0] != "b" {
+		t.Fatalf("shift up: %+v %v %+v", up, err, cfg.Groups[0].Hosts)
+	}
+	if _, err := cfg.ShiftHost(up, -1); err == nil {
+		t.Fatal("expected edge error")
+	}
+}
+
+func TestShiftDirective(t *testing.T) {
+	h := HostBlock{Directives: []Directive{{Key: "A"}, {Key: "B"}}}
+	j, err := h.ShiftDirective(1, -1)
+	if err != nil || j != 0 || h.Directives[0].Key != "B" {
+		t.Fatalf("j=%d err=%v %+v", j, err, h.Directives)
+	}
+	if _, err := h.ShiftDirective(0, -1); err == nil {
+		t.Fatal("expected edge error")
+	}
+}
+
 func TestIncludeFlag(t *testing.T) {
 	raw := `Include config.d/*
 Host x

@@ -174,6 +174,94 @@ func TestSSHConfigArgsForNonDefaultMainConfig(t *testing.T) {
 	}
 }
 
+func typeAndEnter(m *Model, s string) {
+	m.valueInput.SetValue(s)
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+func TestRenamePatternsAndEnterEditsDirective(t *testing.T) {
+	cfg := mustParse(t, "Host a\n    HostName a.example\n\nHost b\n")
+	m := New(cfg, "/nonexistent/ssh_hosts", Options{})
+	m.openDetail(scfg.HostRef{InDefault: true, HostIdx: 0})
+	m.editMode = true
+
+	m.Update(keyRunes("p"))
+	if m.mode != modeInputHostPatterns || m.valueInput.Value() != "a" {
+		t.Fatalf("mode %v value %q", m.mode, m.valueInput.Value())
+	}
+	typeAndEnter(m, "web b")
+	if got := strings.Join(cfg.DefaultHosts[0].Patterns, " "); got != "web b" || !m.dirty {
+		t.Fatalf("patterns %q dirty %v", got, m.dirty)
+	}
+	if !strings.Contains(m.status, "b also defined") {
+		t.Fatalf("expected duplicate note, status %q", m.status)
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != modeInputDirectiveValue || m.valueInput.Value() != "a.example" {
+		t.Fatalf("enter should edit directive; mode %v value %q", m.mode, m.valueInput.Value())
+	}
+	typeAndEnter(m, "web.example")
+	if cfg.DefaultHosts[0].Directives[0].Value != "web.example" {
+		t.Fatalf("directives %+v", cfg.DefaultHosts[0].Directives)
+	}
+}
+
+func TestNewHostGoesToSelectedGroupWithQuickFields(t *testing.T) {
+	cfg := mustParse(t, "Host d\n#@group: work\nHost w1\n")
+	m := New(cfg, "/nonexistent/ssh_hosts", Options{BrowseMode: "openssh"})
+	for i, it := range m.hostList.Items() {
+		if gh, ok := it.(groupHeaderEntry); ok && gh.groupIdx == 0 {
+			m.hostList.Select(i)
+		}
+	}
+	m.Update(keyRunes("n"))
+	if m.mode != modeInputNewHost {
+		t.Fatalf("mode %v", m.mode)
+	}
+	typeAndEnter(m, "w2")
+	if m.mode != modeInputDirectiveValue || m.pendingDirectiveKey != "HostName" {
+		t.Fatalf("expected HostName prompt, mode %v key %q", m.mode, m.pendingDirectiveKey)
+	}
+	typeAndEnter(m, "w2.example") // HostName
+	typeAndEnter(m, "")           // User skipped
+	typeAndEnter(m, "2222")       // Port
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != modeDetail {
+		t.Fatalf("esc should stop prompts, mode %v", m.mode)
+	}
+	g := cfg.Groups[0]
+	if len(g.Hosts) != 2 || g.Hosts[1].Patterns[0] != "w2" {
+		t.Fatalf("group hosts %+v", g.Hosts)
+	}
+	want := []scfg.Directive{{Key: "HostName", Value: "w2.example"}, {Key: "Port", Value: "2222"}}
+	if len(g.Hosts[1].Directives) != 2 || g.Hosts[1].Directives[0] != want[0] || g.Hosts[1].Directives[1] != want[1] {
+		t.Fatalf("directives %+v", g.Hosts[1].Directives)
+	}
+}
+
+func TestReorderHostsAndDirectives(t *testing.T) {
+	cfg := mustParse(t, "Host a\n    User u\n    Port 1\n\nHost b\n")
+	m := New(cfg, "/nonexistent/ssh_hosts", Options{BrowseMode: "openssh"})
+	for i, it := range m.hostList.Items() {
+		if row, ok := it.(hostRowEntry); ok && row.ref.HostIdx == 1 {
+			m.hostList.Select(i)
+		}
+	}
+	m.editMode = true
+	m.Update(keyRunes("K"))
+	if cfg.DefaultHosts[0].Patterns[0] != "b" || m.selRef.HostIdx != 0 {
+		t.Fatalf("hosts %+v selRef %+v", cfg.DefaultHosts, m.selRef)
+	}
+
+	m.openDetail(scfg.HostRef{InDefault: true, HostIdx: 1})
+	m.detailList.Select(1)
+	m.Update(keyRunes("K"))
+	if cfg.DefaultHosts[1].Directives[0].Key != "Port" || m.detailList.Index() != 0 {
+		t.Fatalf("directives %+v index %d", cfg.DefaultHosts[1].Directives, m.detailList.Index())
+	}
+}
+
 func TestQuitAsksWhenDirty(t *testing.T) {
 	m := New(mustParse(t, "Host a\n"), "/nonexistent/ssh_hosts", Options{})
 	if _, cmd := m.Update(keyRunes("q")); !isQuit(cmd) {

@@ -78,6 +78,7 @@ const (
 	modeLockConflict
 	modeConfirmImport // y/N: remove imported host from main ssh_config?
 	modeConfirmQuit   // y/N/w: quit with unsaved changes?
+	modeInputHostPatterns
 )
 
 type detailTab int
@@ -171,6 +172,14 @@ type Model struct {
 	// Password host detail
 	pwSelIdx       int    // index into overlayData.PasswordHosts
 	pwEditFieldKey string // toml field id while editing (hostname, patterns, …)
+
+	// New OpenSSH host: target section and remaining quick-field prompts
+	newHostToDefault bool
+	newHostGroupIdx  int
+	newHostFields    []string
+	newHostPrompting bool // directive value input is one of the quick-field prompts
+
+	saveOverride string // serialized config the user chose to save despite ssh -G rejecting it
 }
 
 var (
@@ -1698,9 +1707,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateActionMenu(msg)
 
 		case modeInputDirectiveValue, modeInputCustomKey, modeInputNewHost, modeInputNewPasswordHost, modeInputDuplicateHost,
-			modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField:
+			modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField,
+			modeInputHostPatterns:
 			switch msg.String() {
 			case "esc":
+				m.newHostPrompting = false
+				m.newHostFields = nil
 				m.editDirectiveIndex = -1
 				m.pendingDirectiveKey = ""
 				m.editGroupIdx = -1
@@ -1780,13 +1792,17 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		if m.editDirectiveIndex >= 0 && m.editDirectiveIndex < len(h.Directives) {
 			h.Directives[m.editDirectiveIndex].Value = val
 			m.status = "Directive updated."
-		} else {
+			m.dirty = true
+		} else if !(m.newHostPrompting && val == "") {
 			h.Directives = append(h.Directives, scfg.Directive{Key: m.pendingDirectiveKey, Value: val})
 			m.status = "Directive added."
+			m.dirty = true
 		}
-		m.dirty = true
 		m.pendingDirectiveKey = ""
 		m.editDirectiveIndex = -1
+		if m.newHostPrompting {
+			return m, m.promptNextNewHostField()
+		}
 		m.mode = modeDetail
 		m.refreshDetailList()
 
@@ -1810,14 +1826,18 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			m.status = errStyle.Render("Enter at least one Host pattern.")
 			return m, nil
 		}
-		m.cfg.DefaultHosts = append(m.cfg.DefaultHosts, scfg.HostBlock{Patterns: pat})
+		ref, err := m.cfg.AppendHost(m.newHostToDefault, m.newHostGroupIdx, scfg.HostBlock{Patterns: pat})
+		if err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
 		m.dirty = true
+		m.selRef = ref
 		rb := m.rebuildHostList()
-		m.selRef = scfg.HostRef{InDefault: true, HostIdx: len(m.cfg.DefaultHosts) - 1}
-		m.mode = modeDetail
-		m.refreshDetailList()
-		m.status = "New host created."
-		return m, rb
+		m.openDetail(ref)
+		m.status = "New host created." + m.duplicatePatternNote(pat, ref)
+		m.newHostFields = append([]string(nil), newHostQuickFields...)
+		return m, tea.Batch(rb, m.promptNextNewHostField())
 
 	case modeInputNewPasswordHost:
 		host := strings.TrimSpace(m.valueInput.Value())
@@ -1844,6 +1864,20 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 		m.openPasswordDetail(newIdx)
 		m.layoutDetailPanes()
 		m.status = "New password host created — e/enter to edit patterns, askpass, …"
+		return m, rb
+
+	case modeInputHostPatterns:
+		pat := strings.Fields(m.valueInput.Value())
+		if len(pat) == 0 {
+			m.status = errStyle.Render("Enter at least one Host pattern.")
+			return m, nil
+		}
+		m.resolveHostAt(m.selRef).Patterns = pat
+		m.dirty = true
+		rb := m.rebuildHostList()
+		m.mode = modeDetail
+		m.refreshDetailList()
+		m.status = "Host patterns updated." + m.duplicatePatternNote(pat, m.selRef)
 		return m, rb
 
 	case modeInputDuplicateHost:
@@ -2189,6 +2223,31 @@ func (m *Model) updateTree(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case msg.String() == "K" || msg.String() == "J":
+		row, ok := m.hostList.SelectedItem().(hostRowEntry)
+		if !ok {
+			return m, nil
+		}
+		m.selRef = row.ref
+		if m.editModeBlocked() {
+			return m, nil
+		}
+		delta := -1
+		if msg.String() == "J" {
+			delta = 1
+		}
+		ref, err := m.cfg.ShiftHost(m.selRef, delta)
+		if err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		m.selRef = ref
+		m.dirty = true
+		m.status = "Host moved (first matching Host block wins per option)."
+		rb := m.rebuildHostList()
+		m.refreshDetailList()
+		return m, rb
+
 	case msg.String() == "D":
 		if m.editModeBlocked() {
 			return m, nil
@@ -2367,6 +2426,17 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.actionMenuList.SetWidth(actionMenuOuterWidth(m.width))
 		m.actionMenuList.SetHeight(actionMenuListHeight(m.height))
 		return m, nil
+	case msg.String() == "p":
+		if m.editModeBlocked() {
+			return m, nil
+		}
+		m.returnAfterInput = modeDetail
+		m.mode = modeInputHostPatterns
+		m.valueInput.SetValue(strings.Join(m.resolveHostAt(m.selRef).Patterns, " "))
+		m.valueInput.CursorEnd()
+		m.valueInput.Placeholder = "Host patterns"
+		m.valueInput.Focus()
+		return m, textinput.Blink
 	case msg.String() == "i":
 		if m.editModeBlocked() {
 			return m, nil
@@ -2406,7 +2476,7 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.keyInput.SetValue("")
 		m.keyInput.Focus()
 		return m, textinput.Blink
-	case msg.String() == "e":
+	case msg.String() == "e" || msg.String() == "enter":
 		if it, ok := m.detailList.SelectedItem().(dirEntry); ok {
 			if m.editModeBlocked() {
 				return m, nil
@@ -2421,6 +2491,32 @@ func (m *Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.valueInput.Focus()
 			return m, textinput.Blink
 		}
+	case msg.String() == "K" || msg.String() == "J":
+		it, ok := m.detailList.SelectedItem().(dirEntry)
+		if !ok {
+			return m, nil
+		}
+		if m.detailTab != detailTabAll {
+			m.status = errStyle.Render("Reorder directives in the Directives tab (t).")
+			return m, nil
+		}
+		if m.editModeBlocked() {
+			return m, nil
+		}
+		delta := -1
+		if msg.String() == "J" {
+			delta = 1
+		}
+		j, err := m.resolveHostAt(m.selRef).ShiftDirective(it.idx, delta)
+		if err != nil {
+			m.status = errStyle.Render(err.Error())
+			return m, nil
+		}
+		m.dirty = true
+		m.refreshDetailList()
+		m.detailList.Select(j)
+		m.status = "Directive moved (for most options the first value wins)."
+		return m, nil
 	case msg.String() == "d":
 		if m.editModeBlocked() {
 			return m, nil
@@ -2874,8 +2970,10 @@ func (m Model) View() string {
 		b.WriteString(lipgloss.Place(m.width, placeH, lipgloss.Center, lipgloss.Center, menu, placeOpts...))
 		return b.String()
 
-	case modeInputDirectiveValue, modeInputNewHost, modeInputNewPasswordHost, modeInputDuplicateHost, modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField:
+	case modeInputDirectiveValue, modeInputNewHost, modeInputNewPasswordHost, modeInputDuplicateHost, modeInputNewGroup, modeInputNewPasswordGroup, modeInputRenameGroup, modeInputGroupDesc, modeInputHostMeta, modeInputPasswordField, modeInputHostPatterns:
 		switch m.mode {
+		case modeInputHostPatterns:
+			b.WriteString(statusStyle.Render("Host patterns (space-separated; first one is used for ssh), Esc cancel"))
 		case modeInputNewGroup:
 			b.WriteString(statusStyle.Render("New group name, Esc cancel"))
 		case modeInputRenameGroup:
@@ -2896,6 +2994,9 @@ func (m Model) View() string {
 		b.WriteByte('\n')
 		if m.mode == modeInputDirectiveValue && m.pendingDirectiveKey != "" {
 			b.WriteString(fmt.Sprintf("Directive: %s\n", m.pendingDirectiveKey))
+			if m.newHostPrompting {
+				b.WriteString(statusStyle.Render("New host: Enter skips an empty field · Esc stops prompting (host is kept)") + "\n")
+			}
 		}
 		if m.mode == modeInputHostMeta {
 			b.WriteString(m.metaInput.View())
@@ -2931,7 +3032,7 @@ func (m Model) View() string {
 			focus = "tree"
 		}
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"focus %s | tab | t tabs | W Include | i meta | A actions | s ssh | a k add | e d D g m o X | v w | $ cfg | & view cfg | z fold | esc tree%s%s",
+			"focus %s | tab | t tabs | W Include | p patterns | i meta | A actions | s ssh | a k add | e/enter d K J D g m o X | v w | $ cfg | & view cfg | z fold | esc tree%s%s",
 			focus, m.editModeSuffix(), m.browseModeSuffix(),
 		)))
 		return b.String()
@@ -2969,7 +3070,7 @@ func (m Model) View() string {
 		b.WriteString(m.joinSplitPanes(left, right, ph, false))
 		b.WriteByte('\n')
 		m.writeStatusFooter(&b, statusStyle.Render(fmt.Sprintf(
-			"enter editor | B browse | I setup | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | v raw | $ cfg | / filter | w r ? q%s%s",
+			"enter editor | B browse | I setup | W Include | A | s ssh | n host | c group | z fold | D del grp | x host | g move | K J order | v raw | $ cfg | / filter | w r ? q%s%s",
 			m.editModeSuffix(), m.browseModeSuffix(),
 		)))
 		return b.String()
@@ -2979,10 +3080,14 @@ func (m Model) View() string {
 // --- Password host detail ---
 
 func (m *Model) startNewOpenSSHHost() tea.Cmd {
+	m.newHostToDefault, m.newHostGroupIdx = m.newHostTarget()
 	m.returnAfterInput = modeTree
 	m.mode = modeInputNewHost
 	m.valueInput.SetValue("")
-	m.valueInput.Placeholder = "Host patterns (space-separated)"
+	m.valueInput.Placeholder = "Host patterns (space-separated) — in (default)"
+	if !m.newHostToDefault {
+		m.valueInput.Placeholder = fmt.Sprintf("Host patterns (space-separated) — in group %q", m.cfg.Groups[m.newHostGroupIdx].Name)
+	}
 	m.valueInput.Focus()
 	return textinput.Blink
 }
@@ -3501,7 +3606,10 @@ Browse (split view)
   z         Collapse/expand group
   B         Cycle browse mode: merged > openssh > password (persisted)
   A         Actions: ssh / sftp / copy / import (on ssh_config hosts)
-  n         New host (OpenSSH or password, depends on browse mode)
+  n         New host (OpenSSH or password, depends on browse mode). OpenSSH hosts go into
+            the group under the cursor, then prompt HostName, User, Port, IdentityFile
+            (Enter skips a field, Esc stops)
+  K / J     Move host up / down within its section (first matching Host wins)
   c         Create group (OpenSSH or password, depends on browse mode)
   D         Delete group (when a group header row is selected)
   x         Delete host (confirm)
@@ -3554,11 +3662,14 @@ Include / read-only (merged view)
 Host detail (split: tree | detail)
   tab       Focus tree vs detail pane
   t         Cycle tab: Overview > All > Connectivity
-  i         Edit #@host metadata lines
+  p         Edit Host patterns (rename the alias)
+  i         Edit #@host metadata lines (Alt+Enter / Ctrl+J for a new line)
   A         Actions menu (ssh / sftp / copy / import)
   s         SSH connect
   a / k     Add directive (picker / custom key)
-  e / d     Edit value / delete directive
+  e / enter Edit value of the selected directive
+  d         Delete directive
+  K / J     Move directive up / down (Directives tab)
   D         Duplicate host
   g         Move host to another group
   m / o     Rename group / edit #@desc
